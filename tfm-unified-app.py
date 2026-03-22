@@ -33,11 +33,14 @@ st.set_page_config(
 # ── Caché global para yfinance ────────────────────────────────
 @st.cache_data(ttl=1800, show_spinner=False)
 def descargar_ticker(ticker, period="2y"):
-    """Descarga datos de yfinance con caché de 30 min."""
+    """Descarga datos de yfinance con caché de 30 min. No cachea fallos."""
     try:
         stock = yf.Ticker(ticker)
         hist = stock.history(period=period)
         info = stock.info or {}
+        # Si no hay datos, lanzar excepción para que NO se cachee
+        if hist.empty or len(info) < 5:
+            raise ValueError(f"Sin datos para {ticker}")
         try: fin = stock.financials
         except: fin = pd.DataFrame()
         try: bs = stock.balance_sheet
@@ -46,6 +49,15 @@ def descargar_ticker(ticker, period="2y"):
         except: cf = pd.DataFrame()
         return hist, info, fin, bs, cf
     except Exception as e:
+        # st.cache_data NO cachea si hay excepción → reintentará la próxima vez
+        raise e
+
+
+def descargar_ticker_safe(ticker, period="2y"):
+    """Wrapper que captura errores y devuelve vacíos sin cachear el fallo."""
+    try:
+        return descargar_ticker(ticker, period)
+    except:
         return pd.DataFrame(), {}, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 
@@ -328,7 +340,7 @@ def _label_score(score):
 
 def analizar_ticker_screener(ticker):
     try:
-        hist, info, _, _, _ = descargar_ticker(ticker, "1y")
+        hist, info, _, _, _ = descargar_ticker_safe(ticker, "1y")
         if hist.empty or len(hist)<60 or len(info)<5: return None
         last=hist.iloc[-1]; prev=hist.iloc[-2] if len(hist)>1 else last
         precio=last["Close"]
@@ -590,10 +602,16 @@ elif pagina == "📈 Análisis Individual":
     if analizar and ticker_in:
         ticker_in=ticker_in.upper().strip()
         with st.spinner(f"Descargando datos de {ticker_in}..."):
-            hist, info, fin, bs, cf = descargar_ticker(ticker_in, "2y")
+            hist, info, fin, bs, cf = descargar_ticker_safe(ticker_in, "2y")
 
-        if hist.empty or len(hist)<100: st.error("Datos insuficientes."); st.stop()
-        if not info: st.error("No se pudo obtener info del ticker."); st.stop()
+        if hist.empty:
+            st.error(f"No se pudieron descargar datos para {ticker_in}. Yahoo Finance puede estar bloqueando temporalmente. Espera unos minutos y reintenta.")
+            st.stop()
+        if len(hist) < 50:
+            st.warning(f"Solo se obtuvieron {len(hist)} sesiones para {ticker_in}. Resultados pueden ser parciales.")
+        if not info:
+            st.error(f"No se pudo obtener info fundamental de {ticker_in}.")
+            st.stop()
 
         nombre=info.get("longName") or info.get("shortName",ticker_in)
         precio=hist["Close"].iloc[-1]; moneda=info.get("currency","")
