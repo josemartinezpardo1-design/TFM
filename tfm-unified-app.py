@@ -1,4 +1,4 @@
-" ""
+"""
 TFM — PLATAFORMA DE INVERSIÓN INTELIGENTE
 Master IA para el Sector Financiero — VIU 2025/26
 
