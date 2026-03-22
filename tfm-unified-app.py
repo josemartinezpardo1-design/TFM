@@ -18,6 +18,7 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 from collections import Counter
 import requests
+import time
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -27,6 +28,25 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+
+# ── Caché global para yfinance ────────────────────────────────
+@st.cache_data(ttl=1800, show_spinner=False)
+def descargar_ticker(ticker, period="2y"):
+    """Descarga datos de yfinance con caché de 30 min."""
+    try:
+        stock = yf.Ticker(ticker)
+        hist = stock.history(period=period)
+        info = stock.info or {}
+        try: fin = stock.financials
+        except: fin = pd.DataFrame()
+        try: bs = stock.balance_sheet
+        except: bs = pd.DataFrame()
+        try: cf = stock.cashflow
+        except: cf = pd.DataFrame()
+        return hist, info, fin, bs, cf
+    except Exception as e:
+        return pd.DataFrame(), {}, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 
 # ╔═══════════════════════════════════════════════════════════════╗
@@ -62,11 +82,9 @@ def calc_adx(df, period=14):
     return dx.rolling(period).mean(), plus_di, minus_di
 
 def calc_obv(df):
-    obv = pd.Series(0.0, index=df.index)
-    for i in range(1, len(df)):
-        if df["Close"].iloc[i] > df["Close"].iloc[i-1]:   obv.iloc[i] = obv.iloc[i-1] + df["Volume"].iloc[i]
-        elif df["Close"].iloc[i] < df["Close"].iloc[i-1]: obv.iloc[i] = obv.iloc[i-1] - df["Volume"].iloc[i]
-        else:                                               obv.iloc[i] = obv.iloc[i-1]
+    # Vectorizado — sin for loop
+    direction = np.sign(df["Close"].diff())
+    obv = (direction * df["Volume"]).fillna(0).cumsum()
     obv_sma = obv.rolling(20).mean()
     obv_trend = pd.Series(np.where(obv > obv_sma, 1, -1), index=df.index)
     p20 = df["Close"].pct_change(20); o20 = obv.pct_change(20)
@@ -310,7 +328,7 @@ def _label_score(score):
 
 def analizar_ticker_screener(ticker):
     try:
-        stock=yf.Ticker(ticker); hist=stock.history(period="1y"); info=stock.info
+        hist, info, _, _, _ = descargar_ticker(ticker, "1y")
         if hist.empty or len(hist)<60 or len(info)<5: return None
         last=hist.iloc[-1]; prev=hist.iloc[-2] if len(hist)>1 else last
         precio=last["Close"]
@@ -504,6 +522,7 @@ if pagina == "🔍 Screener":
                 pb.progress((i+1)/len(ta),text=f"Analizando {t} ({i+1}/{len(ta)})")
                 r=analizar_ticker_screener(t)
                 if r and r.get("MktCap (B$)",0)>=min_mc: resultados.append(r)
+                if i % 5 == 4: time.sleep(0.5)  # Pausa cada 5 tickers para no saturar Yahoo
             pb.empty()
             if not resultados: st.error("Sin resultados.")
             else:
@@ -571,13 +590,10 @@ elif pagina == "📈 Análisis Individual":
     if analizar and ticker_in:
         ticker_in=ticker_in.upper().strip()
         with st.spinner(f"Descargando datos de {ticker_in}..."):
-            try:
-                stock=yf.Ticker(ticker_in); hist=stock.history(period="2y"); info=stock.info
-                try: fin=stock.financials; bs=stock.balance_sheet; cf=stock.cashflow
-                except: fin=bs=cf=pd.DataFrame()
-            except Exception as e: st.error(f"Error: {e}"); st.stop()
+            hist, info, fin, bs, cf = descargar_ticker(ticker_in, "2y")
 
         if hist.empty or len(hist)<100: st.error("Datos insuficientes."); st.stop()
+        if not info: st.error("No se pudo obtener info del ticker."); st.stop()
 
         nombre=info.get("longName") or info.get("shortName",ticker_in)
         precio=hist["Close"].iloc[-1]; moneda=info.get("currency","")
