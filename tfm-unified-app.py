@@ -1,4 +1,4 @@
-"""
+" ""
 TFM — PLATAFORMA DE INVERSIÓN INTELIGENTE
 Master IA para el Sector Financiero — VIU 2025/26
 
@@ -220,6 +220,10 @@ def calcular_cagr_historico(fin):
 def metric_fund(nombre, val, fmt, bueno, malo):
     if val is None: return f"**{nombre}:** N/A"
     ic = "✅" if bueno(val) else ("🔴" if malo(val) else "🟡")
+    # Separar sufijo (%) del formato
+    if fmt.endswith("%"):
+        fmt_clean = fmt[:-1]
+        return f"{ic} **{nombre}:** {val:{fmt_clean}}%"
     return f"{ic} **{nombre}:** {val:{fmt}}"
 
 
@@ -493,6 +497,78 @@ def interpretar_score(score):
     else: return "🔴 REDUCIR / VENDER","#ff5555"
 
 
+# ═════════════════════════════════════════════════════════════════
+# NIVELES OPERATIVOS — Entrada, Stop Loss, Take Profit
+# ═════════════════════════════════════════════════════════════════
+def calcular_niveles_operativos(hist, info):
+    """
+    Calcula niveles operativos basados en ATR, soportes técnicos y target de analistas.
+    Retorna dict con todos los niveles y el detalle de cálculo.
+    """
+    last = hist.iloc[-1]
+    precio = last["Close"]
+    atr_val = last.get("ATR", None)
+    if atr_val is None or pd.isna(atr_val):
+        # Calcular ATR si no está en el DataFrame
+        tr = pd.concat([
+            hist["High"] - hist["Low"],
+            (hist["High"] - hist["Close"].shift(1)).abs(),
+            (hist["Low"] - hist["Close"].shift(1)).abs()
+        ], axis=1).max(axis=1)
+        atr_val = tr.rolling(14).mean().iloc[-1]
+
+    # ── ENTRADAS ──
+    entrada_agresiva = round(precio, 2)
+
+    # Entrada óptima: el soporte técnico más cercano por debajo del precio
+    bb_low = last.get("BB_Low", np.nan)
+    sma50 = last.get("SMA_50", np.nan)
+    soportes = [v for v in [bb_low, sma50] if pd.notna(v) and v < precio]
+    entrada_optima = round(max(soportes), 2) if soportes else round(precio * 0.97, 2)
+
+    # ── STOP LOSS ──
+    # Base: precio - 1.5 × ATR
+    sl_atr = precio - 1.5 * atr_val
+
+    # Override: soporte reciente (mínimo 20 sesiones)
+    soporte_20d = hist["Low"].iloc[-20:].min()
+
+    # Usamos el más protector (el más alto de los dos, pero siempre por debajo del precio)
+    if soporte_20d > sl_atr and soporte_20d < precio:
+        stop_loss = round(soporte_20d, 2)
+        sl_nota = f"Soporte 20d ({soporte_20d:.2f}) > SL ATR ({sl_atr:.2f}) → se usa soporte"
+    else:
+        stop_loss = round(sl_atr, 2)
+        sl_nota = f"ATR×1.5 ({sl_atr:.2f}) > Soporte 20d ({soporte_20d:.2f}) → se usa ATR"
+
+    # ── RIESGO (distancia entrada agresiva → stop loss) ──
+    riesgo = precio - stop_loss
+    riesgo_pct = round(riesgo / precio * 100, 2) if precio > 0 else 0
+
+    # ── TAKE PROFITS ──
+    tp1 = round(precio + 2 * riesgo, 2)  # R/R 2:1
+    tp2 = round(precio + 3 * riesgo, 2)  # R/R 3:1
+
+    # TP3: target de consenso de analistas
+    target_analistas = info.get("targetMeanPrice")
+    tp3 = round(target_analistas, 2) if target_analistas and target_analistas > precio else None
+
+    return {
+        "precio": precio,
+        "entrada_agresiva": entrada_agresiva,
+        "entrada_optima": entrada_optima,
+        "stop_loss": stop_loss,
+        "sl_nota": sl_nota,
+        "riesgo": round(riesgo, 2),
+        "riesgo_pct": riesgo_pct,
+        "atr": round(atr_val, 2),
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3,
+        "soporte_20d": round(soporte_20d, 2),
+    }
+
+
 # ╔═══════════════════════════════════════════════════════════════╗
 # ║  SIDEBAR GLOBAL + ROUTING                                    ║
 # ╚═══════════════════════════════════════════════════════════════╝
@@ -651,6 +727,33 @@ elif pagina == "📈 Análisis Individual":
             tgt=info.get("targetMeanPrice")
             if tgt: st.markdown(f"🎯 **Target:** {tgt:.2f} {moneda} ({((tgt/precio)-1)*100:+.1f}%)")
 
+            # ── NIVELES OPERATIVOS ──
+            st.markdown("---")
+            st.markdown("### 🎯 Niveles Operativos")
+            # Necesitamos ATR en el DataFrame
+            atr_raw, _ = calc_atr(hist)
+            hist["ATR"] = atr_raw
+            niveles = calcular_niveles_operativos(hist, info)
+
+            n1, n2, n3 = st.columns(3)
+            with n1:
+                st.markdown("**ENTRADAS**")
+                st.markdown(f"🟢 **Agresiva:** {niveles['entrada_agresiva']:.2f} {moneda}")
+                st.markdown(f"🔵 **Óptima:** {niveles['entrada_optima']:.2f} {moneda}")
+            with n2:
+                st.markdown("**STOP LOSS**")
+                st.markdown(f"🔴 **SL:** {niveles['stop_loss']:.2f} {moneda} (−{niveles['riesgo_pct']:.1f}%)")
+                st.caption(f"ATR(14): {niveles['atr']:.2f} | Soporte 20d: {niveles['soporte_20d']:.2f}")
+                st.caption(niveles['sl_nota'])
+            with n3:
+                st.markdown("**TAKE PROFIT**")
+                st.markdown(f"🎯 **TP1 (R/R 2:1):** {niveles['tp1']:.2f} {moneda} (+{((niveles['tp1']/precio-1)*100):.1f}%)")
+                st.markdown(f"🎯 **TP2 (R/R 3:1):** {niveles['tp2']:.2f} {moneda} (+{((niveles['tp2']/precio-1)*100):.1f}%)")
+                if niveles['tp3']:
+                    st.markdown(f"🎯 **TP3 (Consenso):** {niveles['tp3']:.2f} {moneda} (+{((niveles['tp3']/precio-1)*100):.1f}%)")
+                else:
+                    st.markdown("🎯 **TP3 (Consenso):** N/A")
+
             # Gráfico 5 paneles
             n=min(len(hist),252); h=hist.iloc[-n:]
             fig=make_subplots(rows=5,cols=1,shared_xaxes=True,vertical_spacing=0.02,
@@ -661,6 +764,20 @@ elif pagina == "📈 Análisis Individual":
             fig.add_trace(go.Scatter(x=h.index,y=h["SMA_200"],name="SMA200",line=dict(color="#ff5555",width=1.2,dash="dash")),row=1,col=1)
             fig.add_trace(go.Scatter(x=h.index,y=h["BB_Up"],line=dict(color="#8be9fd",width=0.6),showlegend=False),row=1,col=1)
             fig.add_trace(go.Scatter(x=h.index,y=h["BB_Low"],name="Bollinger",line=dict(color="#8be9fd",width=0.6),fill="tonexty",fillcolor="rgba(139,233,253,0.08)"),row=1,col=1)
+            # Niveles operativos en el gráfico
+            fig.add_hline(y=niveles["entrada_agresiva"],line_dash="solid",line_color="#50fa7b",opacity=0.7,row=1,col=1,
+                annotation_text=f"Entrada Agresiva {niveles['entrada_agresiva']:.2f}",annotation_position="top left",annotation_font_color="#50fa7b",annotation_font_size=9)
+            fig.add_hline(y=niveles["entrada_optima"],line_dash="dash",line_color="#8be9fd",opacity=0.7,row=1,col=1,
+                annotation_text=f"Entrada Óptima {niveles['entrada_optima']:.2f}",annotation_position="bottom left",annotation_font_color="#8be9fd",annotation_font_size=9)
+            fig.add_hline(y=niveles["stop_loss"],line_dash="solid",line_color="#ff5555",opacity=0.8,row=1,col=1,
+                annotation_text=f"Stop Loss {niveles['stop_loss']:.2f}",annotation_position="bottom left",annotation_font_color="#ff5555",annotation_font_size=9)
+            fig.add_hline(y=niveles["tp1"],line_dash="dot",line_color="#f1fa8c",opacity=0.6,row=1,col=1,
+                annotation_text=f"TP1 {niveles['tp1']:.2f}",annotation_position="top left",annotation_font_color="#f1fa8c",annotation_font_size=9)
+            fig.add_hline(y=niveles["tp2"],line_dash="dot",line_color="#ffb86c",opacity=0.6,row=1,col=1,
+                annotation_text=f"TP2 {niveles['tp2']:.2f}",annotation_position="top left",annotation_font_color="#ffb86c",annotation_font_size=9)
+            if niveles["tp3"]:
+                fig.add_hline(y=niveles["tp3"],line_dash="dot",line_color="#bd93f9",opacity=0.6,row=1,col=1,
+                    annotation_text=f"TP3 Consenso {niveles['tp3']:.2f}",annotation_position="top left",annotation_font_color="#bd93f9",annotation_font_size=9)
             ch=["#50fa7b" if v>=0 else "#ff5555" for v in h["MACD_Hist"]]
             fig.add_trace(go.Bar(x=h.index,y=h["MACD_Hist"],marker_color=ch,showlegend=False),row=2,col=1)
             fig.add_trace(go.Scatter(x=h.index,y=h["MACD"],name="MACD",line=dict(color="#50fa7b",width=1.2)),row=2,col=1)
