@@ -33,24 +33,30 @@ st.set_page_config(
 # ── Caché global para yfinance ────────────────────────────────
 @st.cache_data(ttl=1800, show_spinner=False)
 def descargar_ticker(ticker, period="2y"):
-    """Descarga datos de yfinance con caché de 30 min. No cachea fallos."""
-    try:
-        stock = yf.Ticker(ticker)
-        hist = stock.history(period=period)
-        info = stock.info or {}
-        # Si no hay datos, lanzar excepción para que NO se cachee
-        if hist.empty or len(info) < 5:
-            raise ValueError(f"Sin datos para {ticker}")
-        try: fin = stock.financials
-        except: fin = pd.DataFrame()
-        try: bs = stock.balance_sheet
-        except: bs = pd.DataFrame()
-        try: cf = stock.cashflow
-        except: cf = pd.DataFrame()
-        return hist, info, fin, bs, cf
-    except Exception as e:
-        # st.cache_data NO cachea si hay excepción → reintentará la próxima vez
-        raise e
+    """Descarga datos de yfinance con caché de 30 min. Reintenta si falla."""
+    max_intentos = 3
+    for intento in range(max_intentos):
+        try:
+            stock = yf.Ticker(ticker)
+            hist = stock.history(period=period)
+            info = stock.info or {}
+            if hist.empty or len(info) < 5:
+                if intento < max_intentos - 1:
+                    time.sleep(2 * (intento + 1))
+                    continue
+                raise ValueError(f"Sin datos para {ticker}")
+            try: fin = stock.financials
+            except: fin = pd.DataFrame()
+            try: bs = stock.balance_sheet
+            except: bs = pd.DataFrame()
+            try: cf = stock.cashflow
+            except: cf = pd.DataFrame()
+            return hist, info, fin, bs, cf
+        except Exception as e:
+            if intento < max_intentos - 1:
+                time.sleep(2 * (intento + 1))
+            else:
+                raise e
 
 
 def descargar_ticker_safe(ticker, period="2y"):
@@ -576,7 +582,7 @@ with st.sidebar:
     st.title("📊 TFM Investment App")
     st.caption("Master IA Sector Financiero — VIU")
     st.divider()
-    pagina = st.radio("Módulo", ["🔍 Screener", "📈 Análisis Individual"])
+    pagina = st.radio("Módulo", ["🔍 Screener", "📈 Análisis Individual", "💼 Cartera"])
     st.divider()
 
 
@@ -681,7 +687,10 @@ elif pagina == "📈 Análisis Individual":
             hist, info, fin, bs, cf = descargar_ticker_safe(ticker_in, "2y")
 
         if hist.empty:
-            st.error(f"No se pudieron descargar datos para {ticker_in}. Yahoo Finance puede estar bloqueando temporalmente. Espera unos minutos y reintenta.")
+            st.error(f"No se pudieron descargar datos para {ticker_in}. Yahoo Finance puede estar bloqueando temporalmente.")
+            if st.button("🔄 Limpiar caché y reintentar"):
+                st.cache_data.clear()
+                st.rerun()
             st.stop()
         if len(hist) < 50:
             st.warning(f"Solo se obtuvieron {len(hist)} sesiones para {ticker_in}. Resultados pueden ser parciales.")
@@ -905,3 +914,296 @@ elif pagina == "📈 Análisis Individual":
 
     else:
         st.info("👈 Introduce un ticker y pulsa **Analizar**.")
+
+
+# ╔═══════════════════════════════════════════════════════════════╗
+# ║  PÁGINA 3: CARTERA                                           ║
+# ╚═══════════════════════════════════════════════════════════════╝
+elif pagina == "💼 Cartera":
+    TRADING_DAYS = 252
+    TASA_LIBRE_RIESGO = 0.045
+
+    with st.sidebar:
+        periodo_cart = st.selectbox("Período análisis", ["6mo", "1y", "2y"], index=1)
+        rf_cart = st.number_input("Tasa libre riesgo %", value=4.5, step=0.25) / 100
+        TASA_LIBRE_RIESGO = rf_cart
+        st.divider()
+
+    st.header("💼 Análisis de Cartera")
+    st.markdown("Introduce tus posiciones en la tabla y pulsa **Analizar Cartera**.")
+
+    # ── Tabla editable ──
+    if "cartera_df" not in st.session_state:
+        st.session_state["cartera_df"] = pd.DataFrame({
+            "Ticker": ["AAPL", "MSFT", "GOOGL", "GLD", "TLT"],
+            "Cantidad": [10, 5, 3, 20, 15],
+            "Precio Compra": [150.00, 240.00, 130.00, 180.00, 95.00],
+            "Divisa": ["USD", "USD", "USD", "USD", "USD"],
+        })
+
+    edited_df = st.data_editor(
+        st.session_state["cartera_df"],
+        num_rows="dynamic",
+        use_container_width=True,
+        column_config={
+            "Ticker": st.column_config.TextColumn("Ticker", help="Símbolo de yfinance", required=True),
+            "Cantidad": st.column_config.NumberColumn("Cantidad", min_value=0, required=True),
+            "Precio Compra": st.column_config.NumberColumn("Precio Compra", min_value=0.0, format="%.2f", required=True),
+            "Divisa": st.column_config.SelectboxColumn("Divisa", options=["USD", "EUR", "CHF", "GBP", "JPY"], required=True),
+        },
+        key="cartera_editor",
+    )
+    st.session_state["cartera_df"] = edited_df
+
+    analizar_cart = st.button("🚀 Analizar Cartera", type="primary", use_container_width=True)
+
+    if analizar_cart:
+        # Validar
+        df_cart = edited_df.dropna(subset=["Ticker"]).copy()
+        df_cart = df_cart[df_cart["Cantidad"] > 0]
+        if len(df_cart) < 2:
+            st.error("Necesitas al menos 2 posiciones con datos válidos.")
+            st.stop()
+
+        tickers_cart = df_cart["Ticker"].str.upper().str.strip().tolist()
+
+        with st.spinner("Descargando datos de la cartera..."):
+            # Descargar precios
+            precios_dict = {}
+            valores_pos = {}
+            errores = []
+
+            for _, row in df_cart.iterrows():
+                t = row["Ticker"].upper().strip()
+                try:
+                    hist_t, info_t, _, _, _ = descargar_ticker_safe(t, periodo_cart)
+                    if not hist_t.empty and len(hist_t) > 30:
+                        precios_dict[t] = hist_t["Close"]
+                        precio_actual = hist_t["Close"].iloc[-1]
+                        valores_pos[t] = row["Cantidad"] * precio_actual
+                    else:
+                        errores.append(t)
+                except:
+                    errores.append(t)
+                time.sleep(0.3)
+
+            if errores:
+                st.warning(f"Sin datos para: {', '.join(errores)}")
+
+        if len(precios_dict) < 2:
+            st.error("No hay suficientes datos para el análisis.")
+            st.stop()
+
+        # ── Construir DataFrames ──
+        df_precios = pd.DataFrame(precios_dict).dropna()
+        df_retornos = df_precios.pct_change().dropna()
+
+        # Pesos por valor de mercado
+        valor_total = sum(valores_pos.values())
+        pesos = {t: v / valor_total for t, v in valores_pos.items()}
+        tickers_validos = [t for t in pesos if t in df_retornos.columns]
+        w = np.array([pesos[t] for t in tickers_validos])
+        w = w / w.sum()
+
+        # ── Retorno de cartera ──
+        r_cart = df_retornos[tickers_validos].dot(w)
+
+        # ── Métricas ──
+        ret_anual = r_cart.mean() * TRADING_DAYS * 100
+        vol_anual = r_cart.std() * np.sqrt(TRADING_DAYS) * 100
+        rf_diario = TASA_LIBRE_RIESGO / TRADING_DAYS
+        sharpe = (r_cart.mean() - rf_diario) * TRADING_DAYS / (r_cart.std() * np.sqrt(TRADING_DAYS))
+
+        # Sortino
+        downside = r_cart[r_cart < 0]
+        vol_down = np.std(downside) * np.sqrt(TRADING_DAYS) if len(downside) > 0 else np.nan
+        sortino = ((r_cart.mean() - rf_diario) * TRADING_DAYS) / vol_down if vol_down and vol_down > 0 else np.nan
+
+        # Max Drawdown
+        cum = (1 + r_cart).cumprod()
+        peak = cum.cummax()
+        dd = (cum - peak) / peak
+        mdd = dd.min()
+        calmar = (ret_anual / 100) / abs(mdd) if mdd != 0 else np.nan
+
+        # VaR / CVaR
+        var95 = np.percentile(r_cart.dropna(), 5)
+        cvar95 = r_cart[r_cart <= var95].mean()
+
+        # Beta vs S&P 500
+        try:
+            sp_hist, _, _, _, _ = descargar_ticker_safe("^GSPC", periodo_cart)
+            sp_ret = sp_hist["Close"].pct_change().dropna()
+            alineados = pd.concat([r_cart, sp_ret], axis=1).dropna()
+            alineados.columns = ["cartera", "sp500"]
+            cov_m = np.cov(alineados["cartera"], alineados["sp500"])[0, 1]
+            var_m = np.var(alineados["sp500"])
+            beta = cov_m / var_m if var_m > 0 else np.nan
+        except:
+            beta = np.nan
+
+        # HHI
+        hhi = round(np.sum(np.array(list(pesos.values())) ** 2), 4)
+        n_efectivo = round(1 / hhi, 1) if hhi > 0 else np.nan
+
+        # Correlación media
+        corr_matrix = df_retornos[tickers_validos].corr()
+        corr_vals = corr_matrix.values.copy()
+        np.fill_diagonal(corr_vals, np.nan)
+        corr_avg = round(np.nanmean(corr_vals), 3)
+
+        # Contribución al riesgo
+        sigma = df_retornos[tickers_validos].cov().values * TRADING_DAYS
+        port_vol = np.sqrt(w @ sigma @ w)
+        mrc = sigma @ w
+        contrib_abs = w * mrc
+        contrib_pct = contrib_abs / port_vol * 100
+        contrib_riesgo = dict(zip(tickers_validos, np.round(contrib_pct, 2)))
+
+        # ══════════════════════════════════════════
+        # VISUALIZACIÓN
+        # ══════════════════════════════════════════
+
+        # ── Resumen de valor ──
+        st.subheader("📊 Resumen de la Cartera")
+        st.metric("Valor Total Estimado", f"${valor_total:,.2f}")
+
+        rc1, rc2, rc3 = st.columns(3)
+        with rc1:
+            st.markdown("**📈 Rendimiento**")
+            ic_r = "✅" if ret_anual > 8 else ("🔴" if ret_anual < 0 else "🟡")
+            st.markdown(f"{ic_r} Retorno anualizado: **{ret_anual:+.2f}%**")
+            ic_v = "✅" if vol_anual < 15 else ("🔴" if vol_anual > 30 else "🟡")
+            st.markdown(f"{ic_v} Volatilidad: **{vol_anual:.2f}%**")
+        with rc2:
+            st.markdown("**⚠️ Riesgo**")
+            ic_b = "✅" if 0.5 < beta < 1.2 else ("🔴" if beta > 1.8 else "🟡")
+            st.markdown(f"{ic_b} Beta vs S&P 500: **{beta:.3f}**")
+            st.markdown(f"VaR 95% diario: **{var95*100:.2f}%**")
+            st.markdown(f"CVaR 95%: **{cvar95*100:.2f}%**")
+            ic_dd = "✅" if mdd > -0.10 else ("🔴" if mdd < -0.30 else "🟡")
+            st.markdown(f"{ic_dd} Max Drawdown: **{mdd*100:.2f}%**")
+        with rc3:
+            st.markdown("**🎯 Eficiencia**")
+            ic_s = "✅" if sharpe > 1.0 else ("🔴" if sharpe < 0 else "🟡")
+            st.markdown(f"{ic_s} Sharpe (rf={TASA_LIBRE_RIESGO*100:.1f}%): **{sharpe:.3f}**")
+            ic_so = "✅" if sortino and sortino > 1.5 else ("🔴" if sortino and sortino < 0 else "🟡")
+            st.markdown(f"{ic_so} Sortino: **{sortino:.3f}**" if sortino and not np.isnan(sortino) else "Sortino: N/A")
+            st.markdown(f"Calmar: **{calmar:.3f}**" if calmar and not np.isnan(calmar) else "Calmar: N/A")
+
+        # ── Concentración ──
+        st.markdown("**🧩 Concentración & Diversificación**")
+        cc1, cc2, cc3 = st.columns(3)
+        ic_h = "✅" if hhi < 0.10 else ("🔴" if hhi > 0.20 else "🟡")
+        cc1.markdown(f"{ic_h} HHI: **{hhi:.4f}**")
+        cc2.markdown(f"Posiciones efectivas: **{n_efectivo}**")
+        ic_c = "✅" if corr_avg < 0.30 else ("🔴" if corr_avg > 0.70 else "🟡")
+        cc3.markdown(f"{ic_c} Correlación media: **{corr_avg:.3f}**")
+
+        # ── Tabla de posiciones ──
+        st.subheader("📊 Detalle por Posición")
+        pos_data = []
+        for t in tickers_validos:
+            precio_compra = df_cart[df_cart["Ticker"].str.upper().str.strip() == t]["Precio Compra"].values
+            pc = precio_compra[0] if len(precio_compra) > 0 else 0
+            precio_actual = df_precios[t].iloc[-1]
+            ret_compra = ((precio_actual / pc) - 1) * 100 if pc > 0 else 0
+            ret_periodo = (df_precios[t].iloc[-1] / df_precios[t].iloc[0] - 1) * 100
+            pos_data.append({
+                "Ticker": t,
+                "Peso %": round(pesos[t] * 100, 1),
+                "Precio Compra": round(pc, 2),
+                "Precio Actual": round(precio_actual, 2),
+                "Ret. vs Compra %": round(ret_compra, 1),
+                "Ret. Período %": round(ret_periodo, 1),
+                "Contrib. Riesgo %": contrib_riesgo.get(t, 0),
+            })
+        df_pos = pd.DataFrame(pos_data).sort_values("Peso %", ascending=False)
+        st.dataframe(df_pos, use_container_width=True, height=300)
+
+        # ── GRÁFICOS (4 paneles) ──
+        st.subheader("📊 Análisis Visual")
+        g1, g2 = st.columns(2)
+
+        # Panel 1: Correlaciones
+        with g1:
+            fig_corr = go.Figure(data=go.Heatmap(
+                z=corr_matrix.values, x=tickers_validos, y=tickers_validos,
+                colorscale="RdYlGn_r", zmin=-1, zmax=1,
+                text=np.round(corr_matrix.values, 2), texttemplate="%{text}",
+                textfont={"size": 10},
+            ))
+            fig_corr.update_layout(title="Mapa de Correlaciones", template="plotly_dark",
+                paper_bgcolor="#12121f", plot_bgcolor="#1e1e2e", height=400)
+            st.plotly_chart(fig_corr, use_container_width=True)
+
+        # Panel 2: Contribución al riesgo
+        with g2:
+            cr_sorted = dict(sorted(contrib_riesgo.items(), key=lambda x: x[1], reverse=True))
+            fig_cr = go.Figure(go.Bar(
+                x=list(cr_sorted.keys()), y=list(cr_sorted.values()),
+                marker_color=["#ff5555" if v > 20 else "#ffb86c" if v > 10 else "#50fa7b" for v in cr_sorted.values()],
+                text=[f"{v:.1f}%" for v in cr_sorted.values()], textposition="outside",
+            ))
+            fig_cr.update_layout(title="Contribución al Riesgo por Posición", yaxis_title="%",
+                template="plotly_dark", paper_bgcolor="#12121f", plot_bgcolor="#1e1e2e", height=400)
+            st.plotly_chart(fig_cr, use_container_width=True)
+
+        g3, g4 = st.columns(2)
+
+        # Panel 3: Drawdown
+        with g3:
+            fig_dd = go.Figure()
+            fig_dd.add_trace(go.Scatter(x=dd.index, y=dd * 100, fill="tozeroy",
+                fillcolor="rgba(255,85,85,0.2)", line=dict(color="#ff5555", width=1.5), name="Drawdown"))
+            fig_dd.update_layout(title="Drawdown Histórico", yaxis_title="Drawdown %",
+                template="plotly_dark", paper_bgcolor="#12121f", plot_bgcolor="#1e1e2e", height=400)
+            st.plotly_chart(fig_dd, use_container_width=True)
+
+        # Panel 4: Retorno acumulado vs S&P 500
+        with g4:
+            retorno_acum = (cum / cum.iloc[0] - 1) * 100
+            fig_ret = go.Figure()
+            fig_ret.add_trace(go.Scatter(x=retorno_acum.index, y=retorno_acum,
+                name="Mi Cartera", line=dict(color="#8be9fd", width=2)))
+            try:
+                sp_cum = (1 + alineados["sp500"]).cumprod()
+                sp_acum = (sp_cum / sp_cum.iloc[0] - 1) * 100
+                fig_ret.add_trace(go.Scatter(x=sp_acum.index, y=sp_acum,
+                    name="S&P 500", line=dict(color="#ffb86c", width=1.2, dash="dash")))
+            except:
+                pass
+            fig_ret.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
+            fig_ret.update_layout(title="Retorno Acumulado vs S&P 500", yaxis_title="Retorno %",
+                template="plotly_dark", paper_bgcolor="#12121f", plot_bgcolor="#1e1e2e", height=400)
+            st.plotly_chart(fig_ret, use_container_width=True)
+
+        # ── Asignación de pesos (pie) ──
+        st.subheader("🥧 Asignación de Pesos")
+        fig_pie = px.pie(
+            values=list(pesos.values()), names=list(pesos.keys()),
+            color_discrete_sequence=px.colors.qualitative.Set2,
+        )
+        fig_pie.update_layout(template="plotly_dark", paper_bgcolor="#12121f", height=400)
+        st.plotly_chart(fig_pie, use_container_width=True)
+
+        # ── Resumen ejecutivo ──
+        st.subheader("📋 Resumen Ejecutivo")
+        issues = []
+        if hhi > 0.15:
+            top_pos = max(pesos, key=pesos.get)
+            issues.append(f"⚠️ Concentración alta (HHI={hhi:.3f}). **{top_pos}** domina la cartera.")
+        if corr_avg > 0.50:
+            issues.append(f"⚠️ Correlación media elevada ({corr_avg:.2f}). Las posiciones se mueven juntas.")
+        if sharpe < 0:
+            issues.append(f"🔴 Sharpe negativo ({sharpe:.2f}). El riesgo no está siendo recompensado.")
+        if abs(mdd) > 0.25:
+            issues.append(f"🔴 Max Drawdown severo ({mdd*100:.1f}%). Revisar gestión del riesgo.")
+        if beta and not np.isnan(beta) and beta > 1.5:
+            issues.append(f"⚠️ Beta alta ({beta:.2f}). La cartera amplifica los movimientos del mercado.")
+
+        if issues:
+            for iss in issues:
+                st.markdown(iss)
+        else:
+            st.success("✅ Todos los indicadores de riesgo dentro de rangos aceptables.")
