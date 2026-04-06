@@ -19,6 +19,9 @@ from plotly.subplots import make_subplots
 from collections import Counter
 import requests
 import time
+import finnhub
+from fredapi import Fred
+from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -28,6 +31,14 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ── API Keys desde st.secrets ─────────────────────────────────
+FINNHUB_KEY = st.secrets.get("FINNHUB_KEY", "")
+FRED_KEY = st.secrets.get("FRED_KEY", "")
+
+# Inicializar clientes
+finnhub_client = finnhub.Client(api_key=FINNHUB_KEY) if FINNHUB_KEY else None
+fred_client = Fred(api_key=FRED_KEY) if FRED_KEY else None
 
 
 # ── Caché global para yfinance ────────────────────────────────
@@ -65,6 +76,141 @@ def descargar_ticker_safe(ticker, period="2y"):
         return descargar_ticker(ticker, period)
     except:
         return pd.DataFrame(), {}, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+
+# ── Finnhub: descarga de precios ──────────────────────────────
+@st.cache_data(ttl=1800, show_spinner=False)
+def descargar_precios_finnhub(ticker, days=365):
+    """Descarga OHLCV desde Finnhub. Más estable que yfinance en Streamlit Cloud."""
+    if not finnhub_client:
+        return pd.DataFrame()
+    try:
+        now = int(datetime.now().timestamp())
+        start = int((datetime.now() - timedelta(days=days)).timestamp())
+        res = finnhub_client.stock_candles(ticker, "D", start, now)
+        if res.get("s") != "ok" or not res.get("c"):
+            return pd.DataFrame()
+        df = pd.DataFrame({
+            "Open": res["o"], "High": res["h"], "Low": res["l"],
+            "Close": res["c"], "Volume": res["v"],
+        }, index=pd.to_datetime(res["t"], unit="s"))
+        df.index.name = "Date"
+        return df
+    except:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def obtener_info_finnhub(ticker):
+    """Obtiene perfil + métricas básicas + recomendaciones desde Finnhub."""
+    if not finnhub_client:
+        return {}
+    try:
+        info = {}
+        # Perfil
+        profile = finnhub_client.company_profile2(symbol=ticker)
+        if profile:
+            info["longName"] = profile.get("name", ticker)
+            info["sector"] = profile.get("finnhubIndustry", "N/A")
+            info["marketCap"] = profile.get("marketCapitalization", 0) * 1e6  # viene en millones
+            info["currency"] = profile.get("currency", "USD")
+            info["country"] = profile.get("country", "")
+
+        # Métricas básicas
+        metrics = finnhub_client.company_basic_financials(ticker, "all")
+        if metrics and "metric" in metrics:
+            m = metrics["metric"]
+            info["trailingPE"] = m.get("peBasicExclExtraTTM")
+            info["forwardPE"] = m.get("peTTM")
+            info["priceToBook"] = m.get("pbAnnual")
+            info["priceToSalesTrailing12Months"] = m.get("psTTM")
+            info["returnOnEquity"] = (m.get("roeTTM") or 0) / 100 if m.get("roeTTM") else None
+            info["returnOnAssets"] = (m.get("roaTTM") or 0) / 100 if m.get("roaTTM") else None
+            info["profitMargins"] = (m.get("netProfitMarginTTM") or 0) / 100 if m.get("netProfitMarginTTM") else None
+            info["grossMargins"] = (m.get("grossMarginTTM") or 0) / 100 if m.get("grossMarginTTM") else None
+            info["dividendYield"] = (m.get("dividendYieldIndicatedAnnual") or 0) / 100 if m.get("dividendYieldIndicatedAnnual") else None
+            info["beta"] = m.get("beta")
+            info["52WeekHigh"] = m.get("52WeekHigh")
+            info["52WeekLow"] = m.get("52WeekLow")
+            info["debtToEquity"] = m.get("totalDebt/totalEquityAnnual")
+
+        # Price target
+        try:
+            target = finnhub_client.price_target(ticker)
+            if target:
+                info["targetMeanPrice"] = target.get("targetMean")
+                info["targetHighPrice"] = target.get("targetHigh")
+                info["targetLowPrice"] = target.get("targetLow")
+                info["numberOfAnalystOpinions"] = target.get("lastUpdated", "N/A")
+        except:
+            pass
+
+        # Recomendaciones
+        try:
+            recs = finnhub_client.recommendation_trends(ticker)
+            if recs and len(recs) > 0:
+                r = recs[0]
+                total = r.get("buy",0) + r.get("hold",0) + r.get("sell",0) + r.get("strongBuy",0) + r.get("strongSell",0)
+                if r.get("strongBuy",0) + r.get("buy",0) > r.get("sell",0) + r.get("strongSell",0):
+                    info["recommendationKey"] = "BUY"
+                elif r.get("sell",0) + r.get("strongSell",0) > r.get("buy",0):
+                    info["recommendationKey"] = "SELL"
+                else:
+                    info["recommendationKey"] = "HOLD"
+        except:
+            pass
+
+        return info
+    except:
+        return {}
+
+
+def descargar_ticker_smart(ticker, period="1y"):
+    """
+    Descarga inteligente: Finnhub primero, yfinance como fallback.
+    Retorna (hist_df, info_dict)
+    """
+    days = {"6mo": 180, "1y": 365, "2y": 730, "5y": 1825}.get(period, 365)
+
+    # Intentar Finnhub primero (más estable en Streamlit Cloud)
+    hist = descargar_precios_finnhub(ticker, days)
+    info = obtener_info_finnhub(ticker)
+
+    if not hist.empty and len(hist) > 30:
+        return hist, info
+
+    # Fallback a yfinance
+    try:
+        hist_yf, info_yf, _, _, _ = descargar_ticker_safe(ticker, period)
+        # Combinar info: Finnhub + yfinance
+        merged_info = {**info_yf, **{k: v for k, v in info.items() if v is not None and v != 0}}
+        return hist_yf, merged_info
+    except:
+        return pd.DataFrame(), info
+
+
+# ── FRED: datos macroeconómicos ───────────────────────────────
+@st.cache_data(ttl=3600, show_spinner=False)
+def obtener_datos_fred(series_id, start="2020-01-01"):
+    """Descarga una serie de FRED."""
+    if not fred_client:
+        return pd.Series(dtype=float)
+    try:
+        return fred_client.get_series(series_id, observation_start=start)
+    except:
+        return pd.Series(dtype=float)
+
+
+FRED_SERIES = {
+    "Fed Funds Rate": "FEDFUNDS",
+    "US CPI (inflación)": "CPIAUCSL",
+    "US 10Y Treasury": "DGS10",
+    "US 2Y Treasury": "DGS2",
+    "US Unemployment": "UNRATE",
+    "US GDP": "GDP",
+    "VIX": "VIXCLS",
+    "DXY (Dollar Index)": "DTWEXBGS",
+}
 
 
 # ╔═══════════════════════════════════════════════════════════════╗
@@ -350,8 +496,8 @@ def _label_score(score):
 
 def analizar_ticker_screener(ticker):
     try:
-        hist, info, _, _, _ = descargar_ticker_safe(ticker, "1y")
-        if hist.empty or len(hist)<60 or len(info)<5: return None
+        hist, info = descargar_ticker_smart(ticker, "1y")
+        if hist.empty or len(hist)<60 or len(info)<3: return None
         last=hist.iloc[-1]; prev=hist.iloc[-2] if len(hist)>1 else last
         precio=last["Close"]
         if precio<=0: return None
@@ -584,6 +730,12 @@ with st.sidebar:
     st.divider()
     pagina = st.radio("Módulo", ["🔍 Screener", "📈 Análisis Individual", "💼 Cartera"])
     st.divider()
+    # Estado de APIs
+    st.markdown("**APIs conectadas:**")
+    st.caption(f"{'✅' if finnhub_client else '❌'} Finnhub")
+    st.caption(f"{'✅' if fred_client else '❌'} FRED")
+    st.caption(f"✅ yfinance (fallback)")
+    st.divider()
 
 
 # ╔═══════════════════════════════════════════════════════════════╗
@@ -684,7 +836,12 @@ elif pagina == "📈 Análisis Individual":
     if analizar and ticker_in:
         ticker_in=ticker_in.upper().strip()
         with st.spinner(f"Descargando datos de {ticker_in}..."):
-            hist, info, fin, bs, cf = descargar_ticker_safe(ticker_in, "2y")
+            # Precios: Finnhub primero, yfinance fallback
+            hist, info = descargar_ticker_smart(ticker_in, "2y")
+            # Fundamentales profundos: siempre yfinance (Piotroski, Altman necesitan estados financieros)
+            _, info_yf, fin, bs, cf = descargar_ticker_safe(ticker_in, "2y")
+            # Combinar info
+            info = {**info_yf, **{k: v for k, v in info.items() if v is not None and v != 0 and v != "N/A"}}
 
         if hist.empty:
             st.error(f"No se pudieron descargar datos para {ticker_in}. Yahoo Finance puede estar bloqueando temporalmente.")
@@ -976,7 +1133,7 @@ elif pagina == "💼 Cartera":
             for _, row in df_cart.iterrows():
                 t = row["Ticker"].upper().strip()
                 try:
-                    hist_t, info_t, _, _, _ = descargar_ticker_safe(t, periodo_cart)
+                    hist_t, info_t = descargar_ticker_smart(t, periodo_cart)
                     if not hist_t.empty and len(hist_t) > 30:
                         precios_dict[t] = hist_t["Close"]
                         precio_actual = hist_t["Close"].iloc[-1]
@@ -1032,7 +1189,7 @@ elif pagina == "💼 Cartera":
 
         # Beta vs S&P 500
         try:
-            sp_hist, _, _, _, _ = descargar_ticker_safe("^GSPC", periodo_cart)
+            sp_hist, _ = descargar_ticker_smart("^GSPC", periodo_cart)
             sp_ret = sp_hist["Close"].pct_change().dropna()
             alineados = pd.concat([r_cart, sp_ret], axis=1).dropna()
             alineados.columns = ["cartera", "sp500"]
