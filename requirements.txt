@@ -6,3 +6,4 @@ plotly>=5.18.0
 requests>=2.31.0
 finnhub-python>=2.4.20
 fredapi>=0.5.2
+lxml>=4.9.0
