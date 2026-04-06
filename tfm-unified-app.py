@@ -151,13 +151,31 @@ def yf_safe(ticker, period="2y"):
 
 def smart_download(ticker, period="1y"):
     days = {"6mo": 180, "1y": 365, "2y": 730}.get(period, 365)
+    # Intentar Finnhub
     hist = finnhub_candles(ticker, days)
     info = finnhub_info(ticker)
     if not hist.empty and len(hist) > 30:
         return hist, info
-    h2, i2, _, _, _ = yf_safe(ticker, period)
-    merged = {**i2, **{k: v for k, v in info.items() if v is not None and v != 0}}
-    return h2, merged
+    # Fallback yfinance directo (sin caché que pueda bloquear)
+    try:
+        s = yf.Ticker(ticker)
+        h2 = s.history(period=period)
+        i2 = s.info or {}
+        if not h2.empty:
+            merged = {**i2, **{k: v for k, v in info.items() if v is not None and v != 0}}
+            return h2, merged
+    except Exception:
+        pass
+    # Último intento: yfinance con otro período
+    try:
+        s = yf.Ticker(ticker)
+        h3 = s.history(period="1y" if period != "1y" else "6mo")
+        i3 = s.info or {}
+        if not h3.empty:
+            return h3, {**i3, **info}
+    except Exception:
+        pass
+    return pd.DataFrame(), info
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fred_series(series_id, start="2020-01-01"):
