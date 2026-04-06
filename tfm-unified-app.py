@@ -19,11 +19,22 @@ from plotly.subplots import make_subplots
 from collections import Counter
 import requests
 import time
-import finnhub
-from fredapi import Fred
 from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings("ignore")
+
+# Imports opcionales — si fallan, la app sigue con yfinance
+try:
+    import finnhub
+    HAS_FINNHUB = True
+except ImportError:
+    HAS_FINNHUB = False
+
+try:
+    from fredapi import Fred
+    HAS_FRED = True
+except ImportError:
+    HAS_FRED = False
 
 st.set_page_config(
     page_title="TFM — Investment Intelligence",
@@ -33,26 +44,24 @@ st.set_page_config(
 )
 
 # ── API Keys desde st.secrets ─────────────────────────────────
+FINNHUB_KEY = ""
+FRED_KEY = ""
+finnhub_client = None
+fred_client = None
+
 try:
     FINNHUB_KEY = st.secrets["FINNHUB_KEY"]
+    if HAS_FINNHUB and FINNHUB_KEY:
+        finnhub_client = finnhub.Client(api_key=FINNHUB_KEY)
 except:
-    FINNHUB_KEY = ""
+    pass
 
 try:
     FRED_KEY = st.secrets["FRED_KEY"]
+    if HAS_FRED and FRED_KEY:
+        fred_client = Fred(api_key=FRED_KEY)
 except:
-    FRED_KEY = ""
-
-# Inicializar clientes
-try:
-    finnhub_client = finnhub.Client(api_key=FINNHUB_KEY) if FINNHUB_KEY else None
-except:
-    finnhub_client = None
-
-try:
-    fred_client = Fred(api_key=FRED_KEY) if FRED_KEY else None
-except:
-    fred_client = None
+    pass
 
 
 # ── Caché global para yfinance ────────────────────────────────
@@ -746,8 +755,8 @@ with st.sidebar:
     st.divider()
     # Estado de APIs
     st.markdown("**APIs conectadas:**")
-    st.caption(f"{'✅' if finnhub_client else '❌'} Finnhub")
-    st.caption(f"{'✅' if fred_client else '❌'} FRED")
+    st.caption(f"{'✅' if finnhub_client else '❌'} Finnhub {'(no instalado)' if not HAS_FINNHUB else ''}")
+    st.caption(f"{'✅' if fred_client else '❌'} FRED {'(no instalado)' if not HAS_FRED else ''}")
     st.caption(f"✅ yfinance (fallback)")
     st.divider()
 
