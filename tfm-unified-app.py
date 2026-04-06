@@ -33,12 +33,26 @@ st.set_page_config(
 )
 
 # ── API Keys desde st.secrets ─────────────────────────────────
-FINNHUB_KEY = st.secrets.get("FINNHUB_KEY", "")
-FRED_KEY = st.secrets.get("FRED_KEY", "")
+try:
+    FINNHUB_KEY = st.secrets["FINNHUB_KEY"]
+except:
+    FINNHUB_KEY = ""
+
+try:
+    FRED_KEY = st.secrets["FRED_KEY"]
+except:
+    FRED_KEY = ""
 
 # Inicializar clientes
-finnhub_client = finnhub.Client(api_key=FINNHUB_KEY) if FINNHUB_KEY else None
-fred_client = Fred(api_key=FRED_KEY) if FRED_KEY else None
+try:
+    finnhub_client = finnhub.Client(api_key=FINNHUB_KEY) if FINNHUB_KEY else None
+except:
+    finnhub_client = None
+
+try:
+    fred_client = Fred(api_key=FRED_KEY) if FRED_KEY else None
+except:
+    fred_client = None
 
 
 # ── Caché global para yfinance ────────────────────────────────
