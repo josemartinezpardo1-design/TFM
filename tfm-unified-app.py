@@ -395,11 +395,17 @@ def mf(nombre, val, fmt, bueno, malo):
 @st.cache_data(ttl=86400)
 def get_sp500():
     try:
-        t = pd.read_html(requests.get("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
-                                       headers={"User-Agent": "Mozilla/5.0"}).text)
+        html = requests.get("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+                            headers={"User-Agent": "Mozilla/5.0"}, timeout=10).text
+        t = pd.read_html(html)
         return [x.replace(".", "-") for x in t[0]["Symbol"].tolist()]
     except Exception:
-        return []
+        # Fallback: top 50 del S&P 500 hardcodeados
+        return ["AAPL","MSFT","GOOGL","AMZN","NVDA","META","TSLA","BRK-B","JPM","V",
+                "JNJ","UNH","PG","MA","HD","DIS","NFLX","PFE","KO","PEP","MRK","ABBV",
+                "AVGO","COST","WMT","CSCO","TMO","ABT","CRM","ACN","NKE","MCD","LLY",
+                "DHR","TXN","QCOM","INTC","AMGN","PM","UPS","MS","GS","BLK","AXP",
+                "CAT","BA","GE","IBM","MMM","CVX"]
 
 @st.cache_data(ttl=86400)
 def get_ibex():
@@ -455,7 +461,7 @@ def label_sc(sc):
 def analizar_screener(ticker):
     try:
         hist, info = descargar(ticker, "1y")
-        if hist.empty or len(hist) < 40:
+        if hist.empty or len(hist) < 20:
             return None
         last = hist.iloc[-1]
         precio = last["Close"]
@@ -601,6 +607,8 @@ elif pagina == "📈 Análisis Individual":
         if hist.empty:
             st.error(f"Sin datos para {ticker_in}. Espera 1-2 minutos y reintenta.")
             st.stop()
+        if len(hist) < 50:
+            st.warning(f"Solo {len(hist)} sesiones disponibles. Algunos indicadores pueden ser parciales.")
 
         nombre = info.get("longName") or info.get("shortName", ticker_in)
         precio = hist["Close"].iloc[-1]
@@ -793,6 +801,8 @@ elif pagina == "📈 Análisis Individual":
                     if z:
                         st.markdown(f"**Altman Z:** {z} → {zz}")
 
+            fs = 0  # default si no hay datos para Piotroski
+
             if not fin.empty and not bs.empty and not cf.empty:
                 st.markdown("### 🔢 Piotroski F-Score")
                 fs, fd = calc_piotroski(fin, bs, cf)
@@ -802,6 +812,69 @@ elif pagina == "📈 Análisis Individual":
                     if c.startswith("_"):
                         continue
                     st.markdown(f"{'✅' if v['ok'] else '❌'} {c} — `{v['val']}`")
+
+            # Dividendos
+            dy = info.get("dividendYield")
+            if dy and dy > 0:
+                st.markdown("### 💵 Dividendos")
+                st.markdown(f"{'✅' if dy > 0.03 else '🟡'} **Yield:** {dy*100:.2f}%")
+                dr = info.get("dividendRate")
+                if dr:
+                    st.markdown(f"**Pago anual/acción:** {dr:.2f} {moneda}")
+                pay = info.get("payoutRatio")
+                if pay:
+                    st.markdown(f"**Payout:** {pay*100:.1f}% — {'✅ Sostenible' if pay < 0.6 else '⚠️ Elevado'}")
+
+            # ── VEREDICTO FUNDAMENTAL ──
+            st.markdown("### 🏆 Veredicto Fundamental")
+            pts_v = 0
+            mx_v = 0
+            if per:
+                mx_v += 2
+                pts_v += (2 if per < 15 else 1 if per < 25 else 0)
+            if roe:
+                mx_v += 2
+                pts_v += (2 if roe > 0.20 else 1 if roe > 0.10 else 0)
+            if pm:
+                mx_v += 2
+                pts_v += (2 if pm > 0.15 else 1 if pm > 0.05 else 0)
+            if de is not None:
+                mx_v += 2
+                pts_v += (2 if de < 80 else 1 if de < 150 else 0)
+            if not fin.empty and not bs.empty and not cf.empty:
+                mx_v += 2
+                pts_v += (2 if fs >= 7 else 1 if fs >= 4 else 0)
+
+            if mx_v > 0:
+                pf = pts_v / mx_v
+                if pf >= 0.75:
+                    vf_txt = "🟢 FUNDAMENTALMENTE SÓLIDA"
+                elif pf >= 0.45:
+                    vf_txt = "🟡 FUNDAMENTALMENTE ACEPTABLE"
+                else:
+                    vf_txt = "🔴 FUNDAMENTALMENTE DÉBIL"
+                st.markdown(f"**{vf_txt}** — Puntuación: {pts_v}/{mx_v} ({pf*100:.0f}%)")
+                st.progress(pf)
+
+                # Detalle del veredicto
+                st.caption("Criterios evaluados:")
+                if per:
+                    ic = "✅" if per < 15 else ("🟡" if per < 25 else "🔴")
+                    st.caption(f"  {ic} PER: {per:.1f}")
+                if roe:
+                    ic = "✅" if roe > 0.20 else ("🟡" if roe > 0.10 else "🔴")
+                    st.caption(f"  {ic} ROE: {roe*100:.1f}%")
+                if pm:
+                    ic = "✅" if pm > 0.15 else ("🟡" if pm > 0.05 else "🔴")
+                    st.caption(f"  {ic} Margen Neto: {pm*100:.1f}%")
+                if de is not None:
+                    ic = "✅" if de < 80 else ("🟡" if de < 150 else "🔴")
+                    st.caption(f"  {ic} D/E: {de:.1f}")
+                if not fin.empty and not bs.empty and not cf.empty:
+                    ic = "✅" if fs >= 7 else ("🟡" if fs >= 4 else "🔴")
+                    st.caption(f"  {ic} Piotroski: {fs}/9")
+            else:
+                st.warning("Datos insuficientes para el veredicto.")
     else:
         st.info("👈 Introduce un ticker y pulsa **Analizar**.")
 
