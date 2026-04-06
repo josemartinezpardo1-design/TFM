@@ -41,18 +41,101 @@ except Exception:
 # ║  DESCARGA DE DATOS — Simple y robusto                        ║
 # ╚═══════════════════════════════════════════════════════════════╝
 def descargar(ticker, period="1y"):
-    """Descarga precios + info. Reintenta 3 veces. Sin caché problemática."""
-    for intento in range(3):
+    """
+    Descarga precios + info.
+    1) Finnhub para precios (API oficial, no bloqueada)
+    2) yfinance como fallback
+    3) Info: combina ambas fuentes
+    """
+    days = {"6mo": 180, "1y": 365, "2y": 730, "5y": 1825}.get(period, 365)
+    hist = pd.DataFrame()
+    info = {}
+
+    # ── PASO 1: Precios desde Finnhub (primario) ──
+    if fh_client:
         try:
-            t = yf.Ticker(ticker)
-            h = t.history(period=period)
-            i = t.info or {}
-            if not h.empty and len(h) > 20:
-                return h, i
+            now = int(datetime.now().timestamp())
+            start = int((datetime.now() - timedelta(days=days)).timestamp())
+            r = fh_client.stock_candles(ticker, "D", start, now)
+            if r and r.get("s") == "ok" and r.get("c") and len(r["c"]) > 10:
+                hist = pd.DataFrame({
+                    "Open": r["o"], "High": r["h"], "Low": r["l"],
+                    "Close": r["c"], "Volume": r["v"]
+                }, index=pd.to_datetime(r["t"], unit="s"))
+                hist.index.name = "Date"
         except Exception:
             pass
-        time.sleep(1 + intento)
-    return pd.DataFrame(), {}
+
+    # ── PASO 2: Si Finnhub no dio precios, intentar yfinance ──
+    if hist.empty:
+        for intento in range(2):
+            try:
+                t = yf.Ticker(ticker)
+                h = t.history(period=period)
+                if not h.empty and len(h) > 10:
+                    hist = h
+                    break
+            except Exception:
+                pass
+            time.sleep(1)
+
+    # ── PASO 3: Info desde Finnhub ──
+    if fh_client:
+        try:
+            p = fh_client.company_profile2(symbol=ticker)
+            if p:
+                info["longName"] = p.get("name", ticker)
+                info["sector"] = p.get("finnhubIndustry", "N/A")
+                info["industry"] = p.get("finnhubIndustry", "N/A")
+                info["marketCap"] = (p.get("marketCapitalization") or 0) * 1e6
+                info["currency"] = p.get("currency", "USD")
+        except Exception:
+            pass
+        try:
+            m = fh_client.company_basic_financials(ticker, "all").get("metric", {})
+            if m:
+                info["trailingPE"] = m.get("peBasicExclExtraTTM")
+                info["forwardPE"] = m.get("peTTM")
+                info["priceToBook"] = m.get("pbAnnual")
+                info["priceToSalesTrailing12Months"] = m.get("psTTM")
+                info["returnOnEquity"] = (m.get("roeTTM") or 0) / 100 if m.get("roeTTM") else None
+                info["returnOnAssets"] = (m.get("roaTTM") or 0) / 100 if m.get("roaTTM") else None
+                info["profitMargins"] = (m.get("netProfitMarginTTM") or 0) / 100 if m.get("netProfitMarginTTM") else None
+                info["grossMargins"] = (m.get("grossMarginTTM") or 0) / 100 if m.get("grossMarginTTM") else None
+                info["dividendYield"] = (m.get("dividendYieldIndicatedAnnual") or 0) / 100 if m.get("dividendYieldIndicatedAnnual") else None
+                info["beta"] = m.get("beta")
+                info["debtToEquity"] = m.get("totalDebt/totalEquityAnnual")
+                info["currentRatio"] = m.get("currentRatioAnnual")
+        except Exception:
+            pass
+        try:
+            pt = fh_client.price_target(ticker)
+            if pt:
+                info["targetMeanPrice"] = pt.get("targetMean")
+                info["targetHighPrice"] = pt.get("targetHigh")
+                info["targetLowPrice"] = pt.get("targetLow")
+        except Exception:
+            pass
+        try:
+            recs = fh_client.recommendation_trends(ticker)
+            if recs and len(recs) > 0:
+                r = recs[0]
+                b = r.get("strongBuy", 0) + r.get("buy", 0)
+                s = r.get("strongSell", 0) + r.get("sell", 0)
+                info["recommendationKey"] = "BUY" if b > s else ("SELL" if s > b else "HOLD")
+        except Exception:
+            pass
+
+    # ── PASO 4: Info desde yfinance (complementa lo que Finnhub no tenga) ──
+    try:
+        yf_info = yf.Ticker(ticker).info or {}
+        # yfinance como base, Finnhub sobreescribe lo que tenga
+        merged = {**yf_info, **{k: v for k, v in info.items() if v is not None and v != 0 and v != "N/A"}}
+        info = merged
+    except Exception:
+        pass
+
+    return hist, info
 
 
 def descargar_financials(ticker):
@@ -601,7 +684,6 @@ elif pagina == "📈 Análisis Individual":
         ticker_in = ticker_in.upper().strip()
         with st.spinner(f"Analizando {ticker_in}..."):
             hist, info = descargar(ticker_in, "2y")
-            info = enriquecer_info(ticker_in, info)
             fin, bs, cf = descargar_financials(ticker_in)
 
         if hist.empty:
