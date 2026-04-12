@@ -860,8 +860,52 @@ def recomendar_sectores(sector_weights_pct: dict, profile: str,
 
 
 # ╔═══════════════════════════════════════════════════════════════╗
-# ║  PREDICCIÓN IA — ARQUITECTURAS & FUNCIONES                   ║
+# ║  PREDICCIÓN IA — MODELOS & FUNCIONES                         ║
 # ╚═══════════════════════════════════════════════════════════════╝
+
+# Mapeo: cualquier ticker → modelo más apropiado de los entrenados
+# Lógica: las features son todas normalizadas y genéricas (RSI, MA ratios,
+# log-ret...) → el modelo captura patrones de comportamiento de precio,
+# no características específicas del activo.
+TICKER_TO_MODEL = {
+    # Tecnología / Nasdaq-heavy
+    "AAPL":"QQQ","MSFT":"QQQ","NVDA":"QQQ","GOOGL":"QQQ","META":"QQQ",
+    "AMZN":"QQQ","TSLA":"QQQ","AMD":"QQQ","INTC":"QQQ","CSCO":"QQQ",
+    "QQQ":"QQQ",
+    # Oro / activos refugio
+    "GLD":"GLD","IAU":"GLD","GOLD":"GLD","NEM":"GLD","SLV":"GLD",
+    # Bonos / renta fija
+    "TLT":"IEF","SHY":"IEF","BND":"IEF","AGG":"IEF","LQD":"IEF",
+    "IEF":"IEF","HYG":"IEF","EMB":"IEF",
+    # Materias primas / commodities
+    "DBC":"DBC","USO":"DBC","UNG":"DBC","PDBC":"DBC","BCI":"DBC",
+    # Índices amplios / acciones generales → SPY como proxy
+    "SPY":"SPY",
+}
+
+def seleccionar_modelo(ticker: str, registry: dict) -> tuple:
+    """
+    Devuelve (modelo_ticker, razon) para cualquier ticker libre.
+    Primero busca coincidencia exacta en el registry (los 5 entrenados),
+    luego en el mapeo de afinidad, y por defecto usa SPY.
+    """
+    t = ticker.upper().strip()
+    # 1. Está directamente en los modelos entrenados
+    if t in registry:
+        return t, f"Modelo entrenado específicamente para **{t}**"
+    # 2. Mapeo por afinidad
+    if t in TICKER_TO_MODEL:
+        proxy = TICKER_TO_MODEL[t]
+        return proxy, f"Sin modelo propio para {t} → usando **{proxy}** (alta correlación por tipo de activo)"
+    # 3. Heurísticas por sufijo (mercados europeos, etc.)
+    if t.endswith(".MC") or t.endswith(".DE") or t.endswith(".MI") or t.endswith(".PA"):
+        return "SPY", f"Acción europea → usando **SPY** como proxy de comportamiento de mercado amplio"
+    if t.endswith(".SA"):
+        return "DBC", f"Mercado emergente/Brasil → usando **DBC** como proxy de activos de mayor volatilidad"
+    # 4. Default
+    return "SPY", f"Sin clasificación específica para {t} → usando **SPY** (mercado amplio, fallback conservador)"
+
+
 if TORCH_OK:
     class _LSTMModel(nn.Module):
         def __init__(self, n_feat, hidden, n_layers, dropout):
@@ -921,7 +965,8 @@ if TORCH_OK:
             self.fc      = nn.Linear(hidden, 1)
         def forward(self, x):
             x    = self.pe(self.proj(x))
-            mask = nn.Transformer.generate_square_subsequent_mask(x.size(1)).to(x.device)
+            mask = nn.Transformer.generate_square_subsequent_mask(
+                       x.size(1)).to(x.device)
             x    = self.encoder(x, mask=mask)
             return self.fc(x[:, -1, :]).squeeze(-1)
 
@@ -947,20 +992,16 @@ def cargar_registry():
 
 
 @st.cache_resource
-def cargar_modelo(ticker: str, registry_str: str):
-    """registry_str es json.dumps(registry) para que cache_resource pueda hashear."""
+def cargar_modelo_cached(modelo_ticker: str, registry_json: str):
+    """Carga y cachea un modelo PyTorch. registry_json es string para hashear."""
     if not TORCH_OK:
         return None, "PyTorch no disponible"
-    registry = json.loads(registry_str)
-    if ticker not in registry:
-        return None, f"{ticker} no encontrado en registry"
-    meta = registry[ticker]
-    mn   = meta["model_name"]
-    h    = meta["hidden"]
-    nl   = meta["n_layers"]
-    do   = meta["dropout"]
-    nh   = meta["n_heads"]
-    nf   = meta["n_features"]
+    registry = json.loads(registry_json)
+    if modelo_ticker not in registry:
+        return None, f"{modelo_ticker} no en registry"
+    meta = registry[modelo_ticker]
+    mn, h, nl = meta["model_name"], meta["hidden"], meta["n_layers"]
+    do, nh, nf = meta["dropout"], meta["n_heads"], meta["n_features"]
     try:
         if   mn == "MLP":         model = _MLPModel(meta["win_mlp"] * nf, h, do)
         elif mn == "Transformer": model = _TransformerModel(nf, h, nl, do, nh)
@@ -968,7 +1009,7 @@ def cargar_modelo(ticker: str, registry_str: str):
         elif mn == "GRU":         model = _GRUModel(nf, h, nl, do)
         elif mn == "RNN":         model = _RNNModel(nf, h, nl, do)
         else: return None, f"Arquitectura {mn} desconocida"
-        state = torch.load(meta["file"], map_location="cpu")
+        state = torch.load(meta["file"], map_location="cpu", weights_only=True)
         model.load_state_dict(state)
         model.eval()
         return model, meta
@@ -979,18 +1020,17 @@ def cargar_modelo(ticker: str, registry_str: str):
 def build_features_app(ticker: str):
     """
     Replica exactamente build_features() del notebook.
-    Retorna (DataFrame con 10 features, None) o (None, mensaje_error).
+    Devuelve (DataFrame 10 features, None) o (None, msg_error).
     """
     FEATURE_COLS = [
-        'log_ret', 'ma_5_ratio', 'ma_10_ratio', 'ma_20_ratio',
-        'vol_norm', 'rsi_norm', 'realized_vol', 'momentum_10',
-        'VIX', 'SPREAD'
+        'log_ret','ma_5_ratio','ma_10_ratio','ma_20_ratio',
+        'vol_norm','rsi_norm','realized_vol','momentum_10','VIX','SPREAD'
     ]
-    WIN = 30
     try:
         h, _ = descargar(ticker, "6mo")
         if h.empty or len(h) < 60:
             return None, f"Datos insuficientes ({len(h)} sesiones)"
+
         df = h[["Open","High","Low","Close","Volume"]].copy()
         df.columns = ["open","high","low","close","volume"]
 
@@ -1008,8 +1048,8 @@ def build_features_app(ticker: str):
 
         # VIX
         try:
-            h_vix, _ = descargar("^VIX", "6mo")
-            df = df.join(h_vix["Close"].rename("VIX"), how="left")
+            hv, _ = descargar("^VIX", "6mo")
+            df = df.join(hv["Close"].rename("VIX"), how="left")
             df["VIX"] = df["VIX"].ffill()
         except Exception:
             df["VIX"] = 20.0
@@ -1032,7 +1072,7 @@ def build_features_app(ticker: str):
                 irx, _ = descargar("^IRX", "6mo")
                 if not tnx.empty and not irx.empty:
                     df = df.join(
-                        (tnx["Close"] / 10 - irx["Close"] / 10).rename("SPREAD"), how="left")
+                        (tnx["Close"]/10 - irx["Close"]/10).rename("SPREAD"), how="left")
                     df["SPREAD"] = df["SPREAD"].ffill()
                 else:
                     df["SPREAD"] = 0.5
@@ -1040,33 +1080,31 @@ def build_features_app(ticker: str):
                 df["SPREAD"] = 0.5
 
         df = df[FEATURE_COLS].dropna()
-        if len(df) < WIN:
-            return None, f"Solo {len(df)} filas tras limpiar NaN (mínimo {WIN})"
+        if len(df) < 30:
+            return None, f"Solo {len(df)} filas tras limpiar NaN (mínimo 30)"
         return df, None
     except Exception as e:
         return None, str(e)
 
 
-def predecir_senal(ticker: str, model, meta: dict, features_df: pd.DataFrame):
-    """Normaliza con scaler guardado y corre inferencia. Retorna dict con señal."""
-    FEATURE_COLS = meta["feature_cols"]
-    WIN          = meta["win_seq"]
-    X_raw  = features_df[FEATURE_COLS].values[-WIN:]
+def predecir_senal(model, meta: dict, features_df: pd.DataFrame) -> dict:
+    """Normaliza + inferencia. Devuelve dict con probabilidad y señal."""
+    WIN    = meta["win_seq"]
+    FCOLS  = meta["feature_cols"]
+    X_raw  = features_df[FCOLS].values[-WIN:]
     mean   = np.array(meta["scaler_mean"])
     scale  = np.array(meta["scaler_scale"])
     X_norm = (X_raw - mean) / scale
-    X_t    = torch.FloatTensor(X_norm).unsqueeze(0)
+    X_t    = torch.FloatTensor(X_norm).unsqueeze(0)  # (1, 30, 10)
     with torch.no_grad():
         logit = model(X_t).item()
     prob_alc  = 1 / (1 + np.exp(-logit))
     confianza = abs(prob_alc - 0.5) * 2
-    signal    = "📈 ALCISTA" if prob_alc > 0.5 else "📉 BAJISTA"
     return {
         "prob_alcista": round(prob_alc, 4),
         "prob_bajista": round(1 - prob_alc, 4),
-        "signal":       signal,
+        "signal":       "📈 ALCISTA" if prob_alc > 0.5 else "📉 BAJISTA",
         "confianza":    round(confianza, 4),
-        "logit":        round(logit, 4),
     }
 
 
@@ -2029,68 +2067,76 @@ elif pagina == "📊 Macro":
 elif pagina == "🔮 Predicción IA":
     st.header("🔮 Predicción IA — Señal Direccional")
     st.markdown(
-        "Predicción de dirección del precio para el **día siguiente** "
-        "usando modelos de redes neuronales entrenados sobre datos 2010–2018 "
-        "y evaluados en test 2021–2023."
+        "Introduce **cualquier ticker** para obtener una señal de dirección "
+        "del precio para el **día siguiente**, generada por redes neuronales "
+        "entrenadas sobre datos 2010–2018."
     )
 
     if not TORCH_OK:
-        st.error("PyTorch no está instalado. Añade `torch` a requirements.txt.")
+        st.error("PyTorch no está instalado. Añade `torch` a `requirements.txt` y redespliega.")
         st.stop()
 
     registry = cargar_registry()
-
     if registry is None:
         st.error("No se encontró `model_registry.json` en el repositorio.")
         st.info(
             "**Pasos para activar este módulo:**\n"
             "1. Ejecuta el Bloque 12 en tu notebook de Colab\n"
             "2. Descarga `models_export.zip`\n"
-            "3. Sube los archivos `.pt` y `model_registry.json` a la raíz del repo GitHub\n"
-            "4. Commit & push → el módulo se activa automáticamente"
+            "3. Sube los archivos `.pt` y `model_registry.json` a la **raíz** del repo GitHub\n"
+            "4. Commit → el módulo se activa automáticamente"
         )
         st.stop()
 
-    TICKERS_DISP = list(registry.keys())
-
+    # ── Sidebar ──────────────────────────────────────────────────
     with st.sidebar:
-        ticker_pred      = st.selectbox("Ticker", TICKERS_DISP)
+        ticker_pred      = st.text_input("Ticker (cualquiera)", value="AAPL").upper().strip()
         mostrar_features = st.checkbox("Ver features de entrada", value=False)
         st.divider()
         run_pred = st.button("🔮 Predecir", type="primary", use_container_width=True)
 
-    meta_ticker = registry.get(ticker_pred, {})
+    # ── Selección automática de modelo ───────────────────────────
+    modelo_ticker, razon_modelo = seleccionar_modelo(ticker_pred, registry)
+    meta_modelo = registry.get(modelo_ticker, {})
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Arquitectura",        meta_ticker.get("model_name", "—"))
-    c2.metric("Dir. Accuracy test",  f"{meta_ticker.get('test_dir_accuracy', 0)*100:.1f}%")
-    c3.metric("Sharpe test",         f"{meta_ticker.get('test_sharpe', 0):+.3f}")
+    # Cabecera informativa
+    st.info(f"🧠 {razon_modelo}")
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Ticker analizado",  ticker_pred)
+    col2.metric("Modelo aplicado",   f"{modelo_ticker} ({meta_modelo.get('model_name','—')})")
+    col3.metric("Dir. Accuracy test",f"{meta_modelo.get('test_dir_accuracy',0)*100:.1f}%")
+    col4.metric("Sharpe test",       f"{meta_modelo.get('test_sharpe',0):+.3f}")
     st.caption(
-        f"📊 Entrenado: {meta_ticker.get('train_period','—')} | "
-        f"Evaluado: {meta_ticker.get('test_period','—')} | "
-        f"Ventana: {meta_ticker.get('win_seq', 30)} días | "
-        f"Features: {meta_ticker.get('n_features', 10)}"
+        f"📊 Entrenado: {meta_modelo.get('train_period','—')} | "
+        f"Evaluado: {meta_modelo.get('test_period','—')} | "
+        f"Ventana: {meta_modelo.get('win_seq',30)} días | "
+        f"Features: {meta_modelo.get('n_features',10)}"
     )
 
-    if run_pred:
-        with st.spinner(f"Cargando modelo {meta_ticker.get('model_name','—')} para {ticker_pred}..."):
-            model, meta_o = cargar_modelo(ticker_pred, json.dumps(registry))
+    if run_pred and ticker_pred:
+        # Cargar modelo
+        with st.spinner(f"Cargando modelo {meta_modelo.get('model_name','—')} ({modelo_ticker})..."):
+            model, meta_o = cargar_modelo_cached(modelo_ticker, json.dumps(registry))
 
         if model is None:
             st.error(f"No se pudo cargar el modelo: {meta_o}")
             st.stop()
 
-        with st.spinner("Descargando datos y calculando features..."):
+        # Construir features del ticker introducido
+        with st.spinner(f"Descargando datos de {ticker_pred} y calculando features..."):
             features_df, err = build_features_app(ticker_pred)
 
         if features_df is None:
-            st.error(f"Error construyendo features: {err}")
+            st.error(f"Error construyendo features para {ticker_pred}: {err}")
             st.stop()
 
-        resultado = predecir_senal(ticker_pred, model, meta_o, features_df)
+        # Inferencia
+        resultado = predecir_senal(model, meta_o, features_df)
 
+        # ── Resultado principal ───────────────────────────────────
         st.divider()
-        st.subheader(f"📡 Señal para {ticker_pred} — próximo día hábil")
+        st.subheader(f"📡 Señal para **{ticker_pred}** — próximo día hábil")
 
         prob_alc = resultado["prob_alcista"]
         conf     = resultado["confianza"]
@@ -2102,10 +2148,10 @@ elif pagina == "🔮 Predicción IA":
         else:                  color, emoji = "#ff5555", "🔴"
 
         st.markdown(
-            f"<div style='text-align:center; padding:20px; background:#1e1e2e; "
-            f"border-radius:12px; border: 2px solid {color};'>"
+            f"<div style='text-align:center; padding:24px; background:#1e1e2e; "
+            f"border-radius:12px; border:2px solid {color};'>"
             f"<h1 style='color:{color}; margin:0'>{emoji} {signal}</h1>"
-            f"<p style='color:#ccc; margin:8px 0 0 0; font-size:1.1em'>"
+            f"<p style='color:#ccc; margin:10px 0 0 0; font-size:1.1em'>"
             f"Probabilidad alcista: <b style='color:{color}'>{prob_alc*100:.1f}%</b>"
             f"</p></div>",
             unsafe_allow_html=True
@@ -2116,33 +2162,34 @@ elif pagina == "🔮 Predicción IA":
         m1.metric("Prob. Alcista", f"{prob_alc*100:.1f}%")
         m2.metric("Prob. Bajista", f"{resultado['prob_bajista']*100:.1f}%")
         m3.metric("Confianza",     f"{conf*100:.1f}%",
-                   help="0% = máxima incertidumbre · 100% = señal muy clara")
+                   help="0% = máxima incertidumbre (50/50) · 100% = señal muy definida")
 
-        fig_gauge = go.Figure(go.Indicator(
+        # Gauge
+        fig_g = go.Figure(go.Indicator(
             mode="gauge+number",
             value=prob_alc * 100,
             title={"text": "Probabilidad Alcista (%)"},
             gauge={
-                "axis":       {"range": [0, 100], "tickwidth": 1},
-                "bar":        {"color": color},
-                "bgcolor":    "#1e1e2e",
-                "bordercolor":"#44475a",
+                "axis":        {"range": [0, 100]},
+                "bar":         {"color": color},
+                "bgcolor":     "#1e1e2e",
+                "bordercolor": "#44475a",
                 "steps": [
-                    {"range": [0,  35],  "color": "rgba(255,85,85,0.3)"},
-                    {"range": [35, 50],  "color": "rgba(255,184,108,0.2)"},
-                    {"range": [50, 65],  "color": "rgba(139,233,253,0.2)"},
-                    {"range": [65, 100], "color": "rgba(80,250,123,0.3)"},
+                    {"range": [0,  35],  "color": "rgba(255,85,85,0.25)"},
+                    {"range": [35, 50],  "color": "rgba(255,184,108,0.15)"},
+                    {"range": [50, 65],  "color": "rgba(139,233,253,0.15)"},
+                    {"range": [65, 100], "color": "rgba(80,250,123,0.25)"},
                 ],
                 "threshold": {"line": {"color": "#f8f8f2", "width": 3},
                               "thickness": 0.8, "value": 50}
             },
-            number={"suffix": "%", "font": {"size": 32}},
+            number={"suffix": "%", "font": {"size": 34}},
         ))
-        fig_gauge.update_layout(
-            template="plotly_dark", paper_bgcolor="#12121f",
-            height=300, margin=dict(t=40, b=20, l=30, r=30))
-        st.plotly_chart(fig_gauge, use_container_width=True)
+        fig_g.update_layout(template="plotly_dark", paper_bgcolor="#12121f",
+                            height=300, margin=dict(t=40, b=10, l=20, r=20))
+        st.plotly_chart(fig_g, use_container_width=True)
 
+        # Features opcionales
         if mostrar_features:
             st.subheader("🔬 Últimos 10 días de features (entrada al modelo)")
             WIN   = meta_o.get("win_seq", 30)
@@ -2156,50 +2203,70 @@ elif pagina == "🔮 Predicción IA":
                          use_container_width=True)
             st.caption("Valores normalizados con StandardScaler entrenado en datos 2010-2018")
 
+        # Disclaimer
         st.divider()
-        with st.expander("ℹ️ Cómo interpretar esta señal"):
+        with st.expander("ℹ️ Metodología y limitaciones"):
             st.markdown(f"""
-**¿Qué predice el modelo?**
-El modelo {meta_ticker.get('model_name','—')} genera una probabilidad de que el
-**retorno logarítmico del día siguiente sea positivo** (precio sube).
+**¿Cómo funciona?**
+El modelo recibe los últimos **30 días** de 10 features normalizadas
+(log-retorno, ratios MA, RSI, volatilidad, momentum, VIX, spread 10Y-2Y)
+y predice la probabilidad de que el retorno del día siguiente sea positivo.
 
-**Features utilizadas (10 variables):**
-Log-retorno diario, ratios MA-5/10/20, volumen normalizado, RSI normalizado,
-volatilidad realizada 20d, momentum 10d, VIX, spread 10Y-2Y.
+**¿Por qué se usa el modelo de {modelo_ticker} para {ticker_pred}?**
+Las features son todas ratios y métricas normalizadas — son independientes
+de la escala y el precio absoluto del activo. El modelo aprende patrones
+de comportamiento técnico que generalizan entre activos con perfil similar.
 
-**Contexto del entrenamiento:**
-- Train: 2010–2018 | Val: 2019–2020 | Test: 2021–2023
-- Directional Accuracy en test: **{meta_ticker.get('test_dir_accuracy',0)*100:.1f}%**
-- Sharpe de la estrategia basada en la señal: **{meta_ticker.get('test_sharpe',0):+.3f}**
+**Métricas del modelo {modelo_ticker} en test (2021–2023):**
+- Directional Accuracy: **{meta_modelo.get('test_dir_accuracy',0)*100:.1f}%**
+- Sharpe estrategia: **{meta_modelo.get('test_sharpe',0):+.3f}**
+- Max Drawdown: **{meta_modelo.get('test_max_dd',0)*100:.1f}%**
 
-**⚠️ Limitaciones importantes:**
-- Esta es una señal estadística, no una recomendación de inversión
-- El modelo fue entrenado hasta 2018; el mercado ha cambiado desde entonces
-- Úsala como uno más de los inputs del análisis junto con el técnico y el fundamental
+**⚠️ Limitaciones:**
+- El modelo fue entrenado hasta 2018 — el mercado ha evolucionado
+- Una DA del 55-60% es estadísticamente significativa en finanzas pero
+  no garantiza rentabilidad real (comisiones, slippage, gestión de riesgo)
+- Esta señal es un **input más** del análisis, no una recomendación de inversión
             """)
+
         st.caption(
-            f"📡 Datos: Finnhub / Yahoo Finance / FRED | "
-            f"Modelo: {meta_ticker.get('model_name','—')} entrenado en Colab (PyTorch) | "
-            f"Inferencia: Streamlit"
+            f"📡 Datos: Finnhub / Yahoo Finance | "
+            f"Modelo: {meta_modelo.get('model_name','—')} entrenado en Colab (PyTorch) | "
+            f"Aplicado a: {ticker_pred} via proxy {modelo_ticker}"
         )
 
     else:
-        st.info("👈 Selecciona un ticker y pulsa **Predecir**.")
-        st.subheader("📋 Modelos disponibles")
+        # Estado inicial — tabla de modelos disponibles
+        st.info("👈 Introduce cualquier ticker y pulsa **Predecir**.")
+
+        st.subheader("📋 Modelos entrenados disponibles")
         rows = []
         for tk, meta in registry.items():
             rows.append({
-                "Ticker":        tk,
-                "Arquitectura":  meta.get("model_name","—"),
-                "Dir. Accuracy": f"{meta.get('test_dir_accuracy',0)*100:.1f}%",
-                "Sharpe test":   f"{meta.get('test_sharpe',0):+.3f}",
-                "Max DD test":   f"{meta.get('test_max_dd',0)*100:.1f}%",
-                "Período test":  meta.get("test_period","—"),
+                "Ticker entrenado": tk,
+                "Arquitectura":     meta.get("model_name","—"),
+                "Dir. Accuracy":    f"{meta.get('test_dir_accuracy',0)*100:.1f}%",
+                "Sharpe test":      f"{meta.get('test_sharpe',0):+.3f}",
+                "Max DD test":      f"{meta.get('test_max_dd',0)*100:.1f}%",
+                "Se usa para":      "Cualquier ticker por defecto" if tk == "SPY"
+                                    else f"Activos tipo {tk}",
             })
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        st.subheader("🗺️ Mapeo automático de tickers")
+        st.markdown("""
+        | Tipo de activo | Modelo aplicado | Ejemplos |
+        |---|---|---|
+        | Acciones tech / Nasdaq | **QQQ** | AAPL, MSFT, NVDA, TSLA, GOOGL |
+        | Oro / metales preciosos | **GLD** | IAU, SLV, NEM, GOLD |
+        | Bonos / renta fija | **IEF** | TLT, SHY, BND, LQD, HYG |
+        | Materias primas | **DBC** | USO, UNG, PDBC |
+        | Acciones generales / otros | **SPY** | Cualquier otro ticker |
+        | Acciones europeas (.MC, .DE...) | **SPY** | SAN.MC, SAP.DE, MAIRE.MI |
+        """)
         st.caption(
-            "Modelos entrenados en el curso Redes Neuronales y Aplicaciones Financieras — VIU | "
-            "Selección automática del mejor modelo por ticker según Sharpe en test"
+            "Modelos entrenados en Redes Neuronales y Aplicaciones Financieras — VIU | "
+            "Features: 10 indicadores técnicos normalizados | Ventana: 30 días"
         )
 
 
