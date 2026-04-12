@@ -15,10 +15,17 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
-import requests, time
+import requests, time, json, math as _math
 from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings("ignore")
+
+try:
+    import torch
+    import torch.nn as nn
+    TORCH_OK = True
+except Exception:
+    TORCH_OK = False
 
 st.set_page_config(page_title="TFM — Investment Intelligence", page_icon="📊", layout="wide")
 
@@ -853,6 +860,217 @@ def recomendar_sectores(sector_weights_pct: dict, profile: str,
 
 
 # ╔═══════════════════════════════════════════════════════════════╗
+# ║  PREDICCIÓN IA — ARQUITECTURAS & FUNCIONES                   ║
+# ╚═══════════════════════════════════════════════════════════════╝
+if TORCH_OK:
+    class _LSTMModel(nn.Module):
+        def __init__(self, n_feat, hidden, n_layers, dropout):
+            super().__init__()
+            self.lstm = nn.LSTM(n_feat, hidden, num_layers=n_layers,
+                                batch_first=True,
+                                dropout=dropout if n_layers > 1 else 0)
+            self.fc = nn.Linear(hidden, 1)
+        def forward(self, x):
+            out, _ = self.lstm(x)
+            return self.fc(out[:, -1, :]).squeeze(-1)
+
+    class _GRUModel(nn.Module):
+        def __init__(self, n_feat, hidden, n_layers, dropout):
+            super().__init__()
+            self.gru = nn.GRU(n_feat, hidden, num_layers=n_layers,
+                              batch_first=True,
+                              dropout=dropout if n_layers > 1 else 0)
+            self.fc = nn.Linear(hidden, 1)
+        def forward(self, x):
+            out, _ = self.gru(x)
+            return self.fc(out[:, -1, :]).squeeze(-1)
+
+    class _RNNModel(nn.Module):
+        def __init__(self, n_feat, hidden, n_layers, dropout):
+            super().__init__()
+            self.rnn = nn.RNN(n_feat, hidden, num_layers=n_layers,
+                              batch_first=True,
+                              dropout=dropout if n_layers > 1 else 0)
+            self.fc = nn.Linear(hidden, 1)
+        def forward(self, x):
+            out, _ = self.rnn(x)
+            return self.fc(out[:, -1, :]).squeeze(-1)
+
+    class _PositionalEncoding(nn.Module):
+        def __init__(self, d_model, max_len=500):
+            super().__init__()
+            pe  = torch.zeros(max_len, d_model)
+            pos = torch.arange(0, max_len).unsqueeze(1).float()
+            div = torch.exp(torch.arange(0, d_model, 2).float()
+                            * (-_math.log(10000.0) / d_model))
+            pe[:, 0::2] = torch.sin(pos * div)
+            pe[:, 1::2] = torch.cos(pos * div)
+            self.register_buffer('pe', pe.unsqueeze(0))
+        def forward(self, x):
+            return x + self.pe[:, :x.size(1), :]
+
+    class _TransformerModel(nn.Module):
+        def __init__(self, n_feat, hidden, n_layers, dropout, n_heads):
+            super().__init__()
+            self.proj    = nn.Linear(n_feat, hidden)
+            self.pe      = _PositionalEncoding(hidden)
+            enc_layer    = nn.TransformerEncoderLayer(
+                d_model=hidden, nhead=n_heads, dim_feedforward=hidden * 4,
+                dropout=dropout, batch_first=True, activation='gelu')
+            self.encoder = nn.TransformerEncoder(enc_layer, num_layers=n_layers)
+            self.fc      = nn.Linear(hidden, 1)
+        def forward(self, x):
+            x    = self.pe(self.proj(x))
+            mask = nn.Transformer.generate_square_subsequent_mask(x.size(1)).to(x.device)
+            x    = self.encoder(x, mask=mask)
+            return self.fc(x[:, -1, :]).squeeze(-1)
+
+    class _MLPModel(nn.Module):
+        def __init__(self, input_dim, hidden, dropout):
+            super().__init__()
+            self.net = nn.Sequential(
+                nn.Linear(input_dim, hidden), nn.ReLU(), nn.Dropout(dropout),
+                nn.Linear(hidden, hidden),    nn.ReLU(), nn.Dropout(dropout),
+                nn.Linear(hidden, 1)
+            )
+        def forward(self, x):
+            return self.net(x).squeeze(-1)
+
+
+@st.cache_resource
+def cargar_registry():
+    try:
+        with open("model_registry.json", "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+
+
+@st.cache_resource
+def cargar_modelo(ticker: str, registry_str: str):
+    """registry_str es json.dumps(registry) para que cache_resource pueda hashear."""
+    if not TORCH_OK:
+        return None, "PyTorch no disponible"
+    registry = json.loads(registry_str)
+    if ticker not in registry:
+        return None, f"{ticker} no encontrado en registry"
+    meta = registry[ticker]
+    mn   = meta["model_name"]
+    h    = meta["hidden"]
+    nl   = meta["n_layers"]
+    do   = meta["dropout"]
+    nh   = meta["n_heads"]
+    nf   = meta["n_features"]
+    try:
+        if   mn == "MLP":         model = _MLPModel(meta["win_mlp"] * nf, h, do)
+        elif mn == "Transformer": model = _TransformerModel(nf, h, nl, do, nh)
+        elif mn == "LSTM":        model = _LSTMModel(nf, h, nl, do)
+        elif mn == "GRU":         model = _GRUModel(nf, h, nl, do)
+        elif mn == "RNN":         model = _RNNModel(nf, h, nl, do)
+        else: return None, f"Arquitectura {mn} desconocida"
+        state = torch.load(meta["file"], map_location="cpu")
+        model.load_state_dict(state)
+        model.eval()
+        return model, meta
+    except Exception as e:
+        return None, str(e)
+
+
+def build_features_app(ticker: str):
+    """
+    Replica exactamente build_features() del notebook.
+    Retorna (DataFrame con 10 features, None) o (None, mensaje_error).
+    """
+    FEATURE_COLS = [
+        'log_ret', 'ma_5_ratio', 'ma_10_ratio', 'ma_20_ratio',
+        'vol_norm', 'rsi_norm', 'realized_vol', 'momentum_10',
+        'VIX', 'SPREAD'
+    ]
+    WIN = 30
+    try:
+        h, _ = descargar(ticker, "6mo")
+        if h.empty or len(h) < 60:
+            return None, f"Datos insuficientes ({len(h)} sesiones)"
+        df = h[["Open","High","Low","Close","Volume"]].copy()
+        df.columns = ["open","high","low","close","volume"]
+
+        df["log_ret"]      = np.log(df["close"] / df["close"].shift(1))
+        for w in [5, 10, 20]:
+            df[f"ma_{w}_ratio"] = df["close"] / df["close"].rolling(w).mean() - 1
+        df["vol_norm"]     = df["volume"] / df["volume"].rolling(20).mean()
+        delta = df["close"].diff()
+        gain  = delta.clip(lower=0).rolling(14).mean()
+        loss  = (-delta.clip(upper=0)).rolling(14).mean()
+        rs    = gain / loss.replace(0, 1e-10)
+        df["rsi_norm"]     = (100 - 100 / (1 + rs)) / 100
+        df["realized_vol"] = df["log_ret"].rolling(20).std() * np.sqrt(252)
+        df["momentum_10"]  = df["close"].pct_change(10)
+
+        # VIX
+        try:
+            h_vix, _ = descargar("^VIX", "6mo")
+            df = df.join(h_vix["Close"].rename("VIX"), how="left")
+            df["VIX"] = df["VIX"].ffill()
+        except Exception:
+            df["VIX"] = 20.0
+
+        # SPREAD 10Y-2Y
+        spread_ok = False
+        if fred_client:
+            try:
+                y10 = fred_client.get_series("DGS10", observation_start="2024-01-01").dropna()
+                y2  = fred_client.get_series("DGS2",  observation_start="2024-01-01").dropna()
+                if not y10.empty and not y2.empty:
+                    df = df.join((y10 - y2).rename("SPREAD"), how="left")
+                    df["SPREAD"] = df["SPREAD"].ffill()
+                    spread_ok = True
+            except Exception:
+                pass
+        if not spread_ok:
+            try:
+                tnx, _ = descargar("^TNX", "6mo")
+                irx, _ = descargar("^IRX", "6mo")
+                if not tnx.empty and not irx.empty:
+                    df = df.join(
+                        (tnx["Close"] / 10 - irx["Close"] / 10).rename("SPREAD"), how="left")
+                    df["SPREAD"] = df["SPREAD"].ffill()
+                else:
+                    df["SPREAD"] = 0.5
+            except Exception:
+                df["SPREAD"] = 0.5
+
+        df = df[FEATURE_COLS].dropna()
+        if len(df) < WIN:
+            return None, f"Solo {len(df)} filas tras limpiar NaN (mínimo {WIN})"
+        return df, None
+    except Exception as e:
+        return None, str(e)
+
+
+def predecir_senal(ticker: str, model, meta: dict, features_df: pd.DataFrame):
+    """Normaliza con scaler guardado y corre inferencia. Retorna dict con señal."""
+    FEATURE_COLS = meta["feature_cols"]
+    WIN          = meta["win_seq"]
+    X_raw  = features_df[FEATURE_COLS].values[-WIN:]
+    mean   = np.array(meta["scaler_mean"])
+    scale  = np.array(meta["scaler_scale"])
+    X_norm = (X_raw - mean) / scale
+    X_t    = torch.FloatTensor(X_norm).unsqueeze(0)
+    with torch.no_grad():
+        logit = model(X_t).item()
+    prob_alc  = 1 / (1 + np.exp(-logit))
+    confianza = abs(prob_alc - 0.5) * 2
+    signal    = "📈 ALCISTA" if prob_alc > 0.5 else "📉 BAJISTA"
+    return {
+        "prob_alcista": round(prob_alc, 4),
+        "prob_bajista": round(1 - prob_alc, 4),
+        "signal":       signal,
+        "confianza":    round(confianza, 4),
+        "logit":        round(logit, 4),
+    }
+
+
+# ╔═══════════════════════════════════════════════════════════════╗
 # ║  SIDEBAR                                                      ║
 # ╚═══════════════════════════════════════════════════════════════╝
 with st.sidebar:
@@ -865,6 +1083,7 @@ with st.sidebar:
         "📈 Análisis Individual",
         "💼 Cartera",
         "📊 Macro",
+        "🔮 Predicción IA",
         "🤖 Research",
     ])
     st.divider()
@@ -1802,6 +2021,186 @@ elif pagina == "📊 Macro":
             """)
         else:
             st.warning("No se pudieron cargar los ETFs de renta fija. Reintenta en unos momentos.")
+
+
+# ╔═══════════════════════════════════════════════════════════════╗
+# ║  PREDICCIÓN IA                                                ║
+# ╚═══════════════════════════════════════════════════════════════╝
+elif pagina == "🔮 Predicción IA":
+    st.header("🔮 Predicción IA — Señal Direccional")
+    st.markdown(
+        "Predicción de dirección del precio para el **día siguiente** "
+        "usando modelos de redes neuronales entrenados sobre datos 2010–2018 "
+        "y evaluados en test 2021–2023."
+    )
+
+    if not TORCH_OK:
+        st.error("PyTorch no está instalado. Añade `torch` a requirements.txt.")
+        st.stop()
+
+    registry = cargar_registry()
+
+    if registry is None:
+        st.error("No se encontró `model_registry.json` en el repositorio.")
+        st.info(
+            "**Pasos para activar este módulo:**\n"
+            "1. Ejecuta el Bloque 12 en tu notebook de Colab\n"
+            "2. Descarga `models_export.zip`\n"
+            "3. Sube los archivos `.pt` y `model_registry.json` a la raíz del repo GitHub\n"
+            "4. Commit & push → el módulo se activa automáticamente"
+        )
+        st.stop()
+
+    TICKERS_DISP = list(registry.keys())
+
+    with st.sidebar:
+        ticker_pred      = st.selectbox("Ticker", TICKERS_DISP)
+        mostrar_features = st.checkbox("Ver features de entrada", value=False)
+        st.divider()
+        run_pred = st.button("🔮 Predecir", type="primary", use_container_width=True)
+
+    meta_ticker = registry.get(ticker_pred, {})
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Arquitectura",        meta_ticker.get("model_name", "—"))
+    c2.metric("Dir. Accuracy test",  f"{meta_ticker.get('test_dir_accuracy', 0)*100:.1f}%")
+    c3.metric("Sharpe test",         f"{meta_ticker.get('test_sharpe', 0):+.3f}")
+    st.caption(
+        f"📊 Entrenado: {meta_ticker.get('train_period','—')} | "
+        f"Evaluado: {meta_ticker.get('test_period','—')} | "
+        f"Ventana: {meta_ticker.get('win_seq', 30)} días | "
+        f"Features: {meta_ticker.get('n_features', 10)}"
+    )
+
+    if run_pred:
+        with st.spinner(f"Cargando modelo {meta_ticker.get('model_name','—')} para {ticker_pred}..."):
+            model, meta_o = cargar_modelo(ticker_pred, json.dumps(registry))
+
+        if model is None:
+            st.error(f"No se pudo cargar el modelo: {meta_o}")
+            st.stop()
+
+        with st.spinner("Descargando datos y calculando features..."):
+            features_df, err = build_features_app(ticker_pred)
+
+        if features_df is None:
+            st.error(f"Error construyendo features: {err}")
+            st.stop()
+
+        resultado = predecir_senal(ticker_pred, model, meta_o, features_df)
+
+        st.divider()
+        st.subheader(f"📡 Señal para {ticker_pred} — próximo día hábil")
+
+        prob_alc = resultado["prob_alcista"]
+        conf     = resultado["confianza"]
+        signal   = resultado["signal"]
+
+        if   prob_alc > 0.65: color, emoji = "#50fa7b", "🟢"
+        elif prob_alc > 0.5:  color, emoji = "#8be9fd", "🔵"
+        elif prob_alc > 0.35: color, emoji = "#ffb86c", "🟡"
+        else:                  color, emoji = "#ff5555", "🔴"
+
+        st.markdown(
+            f"<div style='text-align:center; padding:20px; background:#1e1e2e; "
+            f"border-radius:12px; border: 2px solid {color};'>"
+            f"<h1 style='color:{color}; margin:0'>{emoji} {signal}</h1>"
+            f"<p style='color:#ccc; margin:8px 0 0 0; font-size:1.1em'>"
+            f"Probabilidad alcista: <b style='color:{color}'>{prob_alc*100:.1f}%</b>"
+            f"</p></div>",
+            unsafe_allow_html=True
+        )
+        st.markdown("")
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Prob. Alcista", f"{prob_alc*100:.1f}%")
+        m2.metric("Prob. Bajista", f"{resultado['prob_bajista']*100:.1f}%")
+        m3.metric("Confianza",     f"{conf*100:.1f}%",
+                   help="0% = máxima incertidumbre · 100% = señal muy clara")
+
+        fig_gauge = go.Figure(go.Indicator(
+            mode="gauge+number",
+            value=prob_alc * 100,
+            title={"text": "Probabilidad Alcista (%)"},
+            gauge={
+                "axis":       {"range": [0, 100], "tickwidth": 1},
+                "bar":        {"color": color},
+                "bgcolor":    "#1e1e2e",
+                "bordercolor":"#44475a",
+                "steps": [
+                    {"range": [0,  35],  "color": "rgba(255,85,85,0.3)"},
+                    {"range": [35, 50],  "color": "rgba(255,184,108,0.2)"},
+                    {"range": [50, 65],  "color": "rgba(139,233,253,0.2)"},
+                    {"range": [65, 100], "color": "rgba(80,250,123,0.3)"},
+                ],
+                "threshold": {"line": {"color": "#f8f8f2", "width": 3},
+                              "thickness": 0.8, "value": 50}
+            },
+            number={"suffix": "%", "font": {"size": 32}},
+        ))
+        fig_gauge.update_layout(
+            template="plotly_dark", paper_bgcolor="#12121f",
+            height=300, margin=dict(t=40, b=20, l=30, r=30))
+        st.plotly_chart(fig_gauge, use_container_width=True)
+
+        if mostrar_features:
+            st.subheader("🔬 Últimos 10 días de features (entrada al modelo)")
+            WIN   = meta_o.get("win_seq", 30)
+            mean  = np.array(meta_o["scaler_mean"])
+            scale = np.array(meta_o["scaler_scale"])
+            FCOLS = meta_o["feature_cols"]
+            X_norm = (features_df[FCOLS].values[-WIN:] - mean) / scale
+            df_feat = pd.DataFrame(X_norm[-10:], columns=FCOLS)
+            df_feat.index = features_df.index[-10:].strftime("%d/%m/%y")
+            st.dataframe(df_feat.style.background_gradient(cmap="RdYlGn", axis=None),
+                         use_container_width=True)
+            st.caption("Valores normalizados con StandardScaler entrenado en datos 2010-2018")
+
+        st.divider()
+        with st.expander("ℹ️ Cómo interpretar esta señal"):
+            st.markdown(f"""
+**¿Qué predice el modelo?**
+El modelo {meta_ticker.get('model_name','—')} genera una probabilidad de que el
+**retorno logarítmico del día siguiente sea positivo** (precio sube).
+
+**Features utilizadas (10 variables):**
+Log-retorno diario, ratios MA-5/10/20, volumen normalizado, RSI normalizado,
+volatilidad realizada 20d, momentum 10d, VIX, spread 10Y-2Y.
+
+**Contexto del entrenamiento:**
+- Train: 2010–2018 | Val: 2019–2020 | Test: 2021–2023
+- Directional Accuracy en test: **{meta_ticker.get('test_dir_accuracy',0)*100:.1f}%**
+- Sharpe de la estrategia basada en la señal: **{meta_ticker.get('test_sharpe',0):+.3f}**
+
+**⚠️ Limitaciones importantes:**
+- Esta es una señal estadística, no una recomendación de inversión
+- El modelo fue entrenado hasta 2018; el mercado ha cambiado desde entonces
+- Úsala como uno más de los inputs del análisis junto con el técnico y el fundamental
+            """)
+        st.caption(
+            f"📡 Datos: Finnhub / Yahoo Finance / FRED | "
+            f"Modelo: {meta_ticker.get('model_name','—')} entrenado en Colab (PyTorch) | "
+            f"Inferencia: Streamlit"
+        )
+
+    else:
+        st.info("👈 Selecciona un ticker y pulsa **Predecir**.")
+        st.subheader("📋 Modelos disponibles")
+        rows = []
+        for tk, meta in registry.items():
+            rows.append({
+                "Ticker":        tk,
+                "Arquitectura":  meta.get("model_name","—"),
+                "Dir. Accuracy": f"{meta.get('test_dir_accuracy',0)*100:.1f}%",
+                "Sharpe test":   f"{meta.get('test_sharpe',0):+.3f}",
+                "Max DD test":   f"{meta.get('test_max_dd',0)*100:.1f}%",
+                "Período test":  meta.get("test_period","—"),
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.caption(
+            "Modelos entrenados en el curso Redes Neuronales y Aplicaciones Financieras — VIU | "
+            "Selección automática del mejor modelo por ticker según Sharpe en test"
+        )
 
 
 # ╔═══════════════════════════════════════════════════════════════╗
