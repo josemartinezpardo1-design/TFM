@@ -27,6 +27,7 @@ jobs:
             requests==2.31.0 \
             pandas==2.2.2 \
             numpy==1.26.4 \
+            lxml==5.2.1 \
             gspread==6.1.2 \
             google-auth==2.29.0
 
