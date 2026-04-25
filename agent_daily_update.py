@@ -1,11 +1,20 @@
 """
-TFM — Agente Diario de Mercado
-Ejecutado automáticamente por GitHub Actions cada día hábil a las 17:30 ET
+TFM — AGENTE DE DESCUBRIMIENTO DE MERCADO
+Master IA Sector Financiero — VIU 2025/26
 
-Hace tres cosas:
-  1. Descarga datos del día y detecta setups técnicos (S&P 500)
-  2. Rellena retornos forward (3d, 5d, 10d) de setups pasados en Google Sheets
-  3. Añade los setups de hoy al Google Sheet y envía email resumen
+Objetivo: detectar movimientos inusuales en el mercado US que NO están
+en el foco habitual de medios financieros. Cada día identifica los
+tickers con mayor "grado de anomalía" y los presenta para análisis.
+
+Arquitectura:
+  - Universo: Russell 1000 + S&P 400 MidCap + S&P 600 SmallCap (~1500 tickers)
+  - Fuente: Stooq (gratis, funciona desde GitHub Actions)
+  - Excluye: top 100 más mencionados (S&P 100) para forzar descubrimiento
+  - 5 detectores de anomalía, cada uno con su score
+  - Filtros anti-basura: vol avg >300k, precio >$5
+  - Output: Top 10 tickers del día ordenados por anomalía
+
+Ejecución automática: GitHub Actions cada día hábil a las 21:35 UTC
 """
 
 import os
@@ -14,8 +23,9 @@ import time
 import smtplib
 import numpy as np
 import pandas as pd
-import yfinance as yf
+import requests
 import gspread
+from io import StringIO
 from datetime import datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -25,435 +35,336 @@ from google.oauth2.service_account import Credentials
 # ║  CONFIGURACIÓN                                               ║
 # ╚══════════════════════════════════════════════════════════════╝
 SHEET_ID    = "1Yj2KkMypva14ZzpbnP9hDMexhzDGljWU6yhtnsVN980"
-SHEET_TAB   = "agent_setups_2024-04-16_2026-03-31"
 EMAIL_TO    = "josemartinezpardo1@gmail.com"
 EMAIL_FROM  = os.environ.get("GMAIL_USER", "")
 EMAIL_PASS  = os.environ.get("GMAIL_APP_PASSWORD", "")
 GCP_CREDS   = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
 
-UNIVERSE = [
-    "AAPL","MSFT","NVDA","GOOGL","META","AMZN","TSLA","AVGO","BRK-B","JPM",
-    "V","UNH","LLY","XOM","MA","JNJ","PG","HD","COST","MRK","ABBV","CVX",
-    "CRM","NFLX","BAC","AMD","WFC","TMO","ORCL","KO","ACN","PEP","CSCO",
-    "LIN","MCD","ABT","TXN","WMT","QCOM","GE","CAT","GS","MS","DHR","RTX",
-    "HON","AMGN","INTU","SPGI","ISRG","BKNG","NOW","AXP","PLD","MDLZ","SYK",
-    "ADI","GILD","MMC","ZTS","BLK","CB","CME","ETN","TJX","MO","REGN","PGR",
-    "BSX","C","ITW","ADP","BMY","NKE","SO","DUK","NEE","SHW","CL","WM","EMR",
-    "SBUX","GD","HUM","APD","F","GM","DAL","BA","LMT","NOC","DE","MMM","FDX",
-    "UPS","CSX",
-]
-
-SECTOR_MAP = {
-    "AAPL":"Technology","MSFT":"Technology","NVDA":"Technology","GOOGL":"Technology",
-    "META":"Technology","AVGO":"Technology","AMD":"Technology","INTC":"Technology",
-    "ORCL":"Technology","CRM":"Technology","CSCO":"Technology","QCOM":"Technology",
-    "TXN":"Technology","ADBE":"Technology","NOW":"Technology","INTU":"Technology",
-    "AMAT":"Technology","ACN":"Technology","ADI":"Technology","SPGI":"Financials",
-    "JPM":"Financials","BAC":"Financials","WFC":"Financials","GS":"Financials",
-    "MS":"Financials","BLK":"Financials","AXP":"Financials","SCHW":"Financials",
-    "C":"Financials","PNC":"Financials","MMC":"Financials","CME":"Financials",
-    "CB":"Financials","V":"Financials","MA":"Financials","BRK-B":"Financials",
-    "UNH":"Health Care","JNJ":"Health Care","LLY":"Health Care","ABBV":"Health Care",
-    "MRK":"Health Care","PFE":"Health Care","TMO":"Health Care","ABT":"Health Care",
-    "DHR":"Health Care","AMGN":"Health Care","ISRG":"Health Care","VRTX":"Health Care",
-    "GILD":"Health Care","SYK":"Health Care","ZTS":"Health Care","BSX":"Health Care",
-    "REGN":"Health Care","HUM":"Health Care","BMY":"Health Care","MDT":"Health Care",
-    "AMZN":"Consumer Discretionary","TSLA":"Consumer Discretionary",
-    "HD":"Consumer Discretionary","MCD":"Consumer Discretionary",
-    "NKE":"Consumer Discretionary","SBUX":"Consumer Discretionary",
-    "TJX":"Consumer Discretionary","BKNG":"Consumer Discretionary",
-    "F":"Consumer Discretionary","GM":"Consumer Discretionary",
-    "PG":"Consumer Staples","KO":"Consumer Staples","PEP":"Consumer Staples",
-    "WMT":"Consumer Staples","COST":"Consumer Staples","MDLZ":"Consumer Staples",
-    "CL":"Consumer Staples","MO":"Consumer Staples",
-    "CAT":"Industrials","BA":"Industrials","GE":"Industrials","UPS":"Industrials",
-    "HON":"Industrials","LMT":"Industrials","RTX":"Industrials","DE":"Industrials",
-    "MMM":"Industrials","FDX":"Industrials","NOC":"Industrials","GD":"Industrials",
-    "ETN":"Industrials","ITW":"Industrials","EMR":"Industrials","CSX":"Industrials",
-    "XOM":"Energy","CVX":"Energy","COP":"Energy","SLB":"Energy",
-    "LIN":"Materials","APD":"Materials","SHW":"Materials","NEM":"Materials",
-    "NEE":"Utilities","DUK":"Utilities","SO":"Utilities","WM":"Utilities",
-    "AMT":"Real Estate","PLD":"Real Estate","EQIX":"Real Estate",
-    "NFLX":"Communication Services","DIS":"Communication Services",
-    "CMCSA":"Communication Services","T":"Communication Services",
-    "ADP":"Industrials","PGR":"Financials","WFC":"Financials",
+# ── Exclusión: S&P 100 (los más mencionados — no queremos descubrir esto) ──
+EXCLUDE_OVERKNOWN = {
+    "AAPL","MSFT","NVDA","GOOGL","GOOG","AMZN","META","TSLA","AVGO","BRK-B",
+    "JPM","LLY","V","XOM","UNH","MA","HD","PG","JNJ","COST",
+    "NFLX","BAC","ORCL","ABBV","CVX","KO","WMT","MRK","ADBE","CRM",
+    "PEP","TMO","LIN","ACN","CSCO","MCD","DIS","AMD","ABT","IBM",
+    "INTC","PFE","NOW","TXN","WFC","DHR","AXP","QCOM","NEE","AMGN",
+    "VZ","CMCSA","T","PM","GE","RTX","CAT","SPGI","GS","MS",
+    "UBER","BLK","PYPL","SBUX","NKE","BKNG","PLD","GILD","LOW","TJX",
+    "DE","SYK","ADP","MDT","LMT","MMC","ETN","PGR","BSX","CB",
+    "ISRG","VRTX","CI","SO","FI","DUK","KLAC","INTU","SCHW","BMY",
+    "AMAT","ANET","HON","AMT","CRWD","REGN","PANW","ELV","TMUS","FDX"
 }
 
+# ── Filtros anti-basura ──────────────────────────────────────────
 CFG = {
-    "ma50_vol_min":   1.5,
-    "rsi_oversold":   32,
-    "vol_surge":      2.5,
-    "high52_prox":    0.98,
-    "golden_prox":    0.02,
-    "min_price":      5.0,
-    "min_vol_avg":    500_000,
+    "min_price":           5.0,
+    "min_vol_avg":         300_000,
+    "min_days_data":       60,
+    "top_n_email":         10,
 }
 
 
 # ╔══════════════════════════════════════════════════════════════╗
-# ║  UTILIDADES                                                  ║
+# ║  UNIVERSO DE TICKERS                                         ║
 # ╚══════════════════════════════════════════════════════════════╝
-def add_trading_days(date: datetime, days: int) -> datetime:
-    d, added = date, 0
-    while added < days:
-        d -= timedelta(days=1)
-        if d.weekday() < 5:
-            added += 1
-    return d
+def get_universe():
+    """Obtiene universo amplio combinando Russell 1000 + S&P 400 + S&P 600."""
+    universe = set()
 
-def sma(series: pd.Series, n: int):
+    # S&P 400 MidCap + S&P 600 SmallCap (desde Wikipedia, funciona siempre)
+    sources = [
+        ("S&P 400 MidCap",  "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies"),
+        ("S&P 600 SmallCap","https://en.wikipedia.org/wiki/List_of_S%26P_600_companies"),
+        ("S&P 500",         "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"),
+    ]
+
+    for name, url in sources:
+        try:
+            html = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15).text
+            tables = pd.read_html(html)
+            found = 0
+            for t in tables:
+                symbol_col = None
+                for col in t.columns:
+                    if "symbol" in str(col).lower() or "ticker" in str(col).lower():
+                        symbol_col = col
+                        break
+                if symbol_col:
+                    tickers = t[symbol_col].dropna().astype(str).tolist()
+                    for tk in tickers:
+                        tk = tk.strip().replace(".", "-").upper()
+                        if tk and tk not in ("-", "NAN", "NONE"):
+                            universe.add(tk)
+                            found += 1
+                    break
+            print(f"  ✅ {name}: +{found} tickers  (total acumulado: {len(universe)})")
+        except Exception as e:
+            print(f"  ⚠️ {name} falló: {e}")
+
+    # Excluir los sobre-conocidos
+    universe = universe - EXCLUDE_OVERKNOWN
+
+    # Lista de respaldo si todo falla
+    if len(universe) < 100:
+        print("  ⚠️ Usando lista de respaldo")
+        universe = {
+            "AMKR","ANF","AOS","APA","AR","ARW","ASH","ATI","AVT","AWI","AZZ",
+            "BCO","BDC","BJ","BLD","BMI","BOX","BTU","BWA","BYD","CACI","CAR",
+            "CBT","CCK","CDP","CELH","CENX","CFR","CHE","CHX","CIEN","CMC",
+            "CNX","COHR","COLB","CR","CRC","CROX","CRUS","CSGS","CTLT","CW",
+            "CWH","CXT","CYH","DCI","DINO","DIOD","DKS","DNB","DOCS","DORM",
+            "DSGX","DY","EGP","EHC","ELF","ELS","EME","ENR","ENS","ENV",
+            "EPAM","EPR","ESAB","ESE","EVR","EWBC","EXLS","EXPI","FAF","FBP",
+            "FCN","FFIN","FIX","FIZZ","FL","FLO","FLR","FMC","FNB","FOUR",
+            "FRPT","FSS","FTDR","FUL","FULT","GEF","GGG","GKOS","GLPI","GMS",
+            "GNTX","GO","GPI","GPK","GT","GTES","GVA","HAE","HELE","HLI",
+            "HLIT","HOG","HOMB","HR","HRB","HTH","HUBG","HXL","IAC","ICUI",
+            "IDA","IDCC","IDYA","IIPR","INDB","INT","IOSP","IPAR","IRDM","ITRI"
+        }
+
+    return sorted(universe)
+
+
+# ╔══════════════════════════════════════════════════════════════╗
+# ║  DESCARGA DE DATOS — STOOQ                                   ║
+# ╚══════════════════════════════════════════════════════════════╝
+def stooq_download(ticker, days=120):
+    """Descarga OHLCV de Stooq para un ticker US."""
+    try:
+        symbol = ticker.lower() + ".us"
+        url    = f"https://stooq.com/q/d/l/?s={symbol}&i=d"
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+
+        if r.status_code != 200 or "Date,Open" not in r.text:
+            return None
+
+        df = pd.read_csv(StringIO(r.text))
+        if df.empty or "Close" not in df.columns:
+            return None
+
+        df["Date"] = pd.to_datetime(df["Date"])
+        df = df.sort_values("Date").tail(days).reset_index(drop=True)
+        return df
+    except Exception:
+        return None
+
+
+# ╔══════════════════════════════════════════════════════════════╗
+# ║  INDICADORES                                                 ║
+# ╚══════════════════════════════════════════════════════════════╝
+def sma(series, n):
     if len(series) < n:
         return None
-    return series.iloc[-n:].mean()
+    return float(series.iloc[-n:].mean())
 
-def calc_rsi(series: pd.Series, period: int = 14):
+def rsi(series, period=14):
     if len(series) < period + 1:
         return None
     delta = series.diff().dropna()
     gain  = delta.clip(lower=0).rolling(period).mean()
     loss  = (-delta.clip(upper=0)).rolling(period).mean()
     rs    = gain / loss.replace(0, 1e-10)
-    rsi   = 100 - (100 / (1 + rs))
-    return float(rsi.iloc[-1]) if not pd.isna(rsi.iloc[-1]) else None
+    val   = (100 - 100 / (1 + rs)).iloc[-1]
+    return float(val) if not pd.isna(val) else None
 
-def vol_ratio(volumes: pd.Series):
-    if len(volumes) < 21:
+
+# ╔══════════════════════════════════════════════════════════════╗
+# ║  DETECTORES DE ANOMALÍA                                      ║
+# ╚══════════════════════════════════════════════════════════════╝
+def analizar_ticker(ticker, df, spy_ret_today):
+    if df is None or len(df) < CFG["min_days_data"]:
         return None
-    last = volumes.iloc[-1]
-    avg  = volumes.iloc[-21:-1].mean()
-    return float(last / avg) if avg > 0 else None
-
-
-# ╔══════════════════════════════════════════════════════════════╗
-# ║  GOOGLE SHEETS                                               ║
-# ╚══════════════════════════════════════════════════════════════╝
-def conectar_sheets():
-    """Conecta a Google Sheets via Service Account."""
-    creds_dict = json.loads(GCP_CREDS)
-    creds = Credentials.from_service_account_info(
-        creds_dict,
-        scopes=["https://www.googleapis.com/auth/spreadsheets"]
-    )
-    client = gspread.authorize(creds)
-    sh     = client.open_by_key(SHEET_ID)
-    return sh.worksheet(SHEET_TAB)
-
-def leer_sheet(ws) -> pd.DataFrame:
-    """Lee el Sheet completo como DataFrame."""
-    data = ws.get_all_records()
-    if not data:
-        return pd.DataFrame()
-    return pd.DataFrame(data)
-
-def rellenar_forward_returns(ws, df: pd.DataFrame, precios_hoy: dict, today: str):
-    """
-    Para las filas con fwd_ret vacío y fecha = hace 3/5/10 días hábiles,
-    calcula el retorno y actualiza la celda en Sheets.
-    """
-    now = datetime.strptime(today, "%Y-%m-%d")
-    date3d  = add_trading_days(now, 3).strftime("%Y-%m-%d")
-    date5d  = add_trading_days(now, 5).strftime("%Y-%m-%d")
-    date10d = add_trading_days(now, 10).strftime("%Y-%m-%d")
-
-    if df.empty:
-        return 0
-
-    # Cabecera para saber número de columna
-    headers  = ws.row_values(1)
-    col_map  = {h: i+1 for i, h in enumerate(headers)}
-
-    updates  = []
-    n_updated = 0
-
-    for idx, row in df.iterrows():
-        fecha  = str(row.get("fecha", ""))
-        ticker = str(row.get("ticker", ""))
-        precio_base = float(row.get("precio", 0) or 0)
-        precio_hoy  = precios_hoy.get(ticker)
-
-        if not precio_hoy or precio_base <= 0:
-            continue
-
-        row_num = idx + 2  # +2 por 1-indexed y header
-
-        def ret(p_base, p_hoy):
-            return round((p_hoy / p_base - 1) * 100, 2)
-
-        if fecha == date3d and not str(row.get("fwd_ret_3d_pct", "")).strip():
-            col = col_map.get("fwd_ret_3d_pct")
-            if col:
-                updates.append({"range": gspread.utils.rowcol_to_a1(row_num, col),
-                                 "values": [[ret(precio_base, precio_hoy)]]})
-                n_updated += 1
-
-        if fecha == date5d and not str(row.get("fwd_ret_5d_pct", "")).strip():
-            col = col_map.get("fwd_ret_5d_pct")
-            if col:
-                updates.append({"range": gspread.utils.rowcol_to_a1(row_num, col),
-                                 "values": [[ret(precio_base, precio_hoy)]]})
-                n_updated += 1
-
-        if fecha == date10d and not str(row.get("fwd_ret_10d_pct", "")).strip():
-            col = col_map.get("fwd_ret_10d_pct")
-            if col:
-                updates.append({"range": gspread.utils.rowcol_to_a1(row_num, col),
-                                 "values": [[ret(precio_base, precio_hoy)]]})
-                n_updated += 1
-
-    if updates:
-        ws.batch_update(updates)
-        print(f"  ✅ {n_updated} retornos forward actualizados")
-    else:
-        print("  ℹ️  No hay retornos forward que actualizar hoy")
-
-    return n_updated
-
-def append_setups(ws, setups: list):
-    """Añade los setups de hoy al final del Sheet."""
-    if not setups:
-        print("  ℹ️  No hay setups nuevos que añadir")
-        return
-
-    headers = ws.row_values(1)
-    rows    = []
-    for s in setups:
-        rows.append([str(s.get(h, "")) for h in headers])
-
-    ws.append_rows(rows, value_input_option="RAW")
-    print(f"  ✅ {len(setups)} setups añadidos al Sheet")
-
-
-# ╔══════════════════════════════════════════════════════════════╗
-# ║  DETECCIÓN DE SETUPS                                         ║
-# ╚══════════════════════════════════════════════════════════════╝
-def detectar_setups(today: str) -> tuple[list, dict, float, float, str]:
-    """
-    Descarga datos y detecta setups técnicos.
-    Retorna (setups, precios_hoy, spy_chg, vix_val, regimen)
-    """
-    print(f"\n📡 Descargando datos para {today}...")
-
-    # ── Benchmark y VIX ────────────────────────────────────────
-    spy_chg   = None
-    spy_price = None
-    vix_val   = None
-    regimen   = "N/A"
 
     try:
-        spy = yf.download("SPY", period="5d", progress=False, auto_adjust=True)
-        if not spy.empty and len(spy) >= 2:
-            spy_price = float(spy["Close"].iloc[-1])
-            spy_prev  = float(spy["Close"].iloc[-2])
-            spy_chg   = round((spy_price / spy_prev - 1) * 100, 2)
-            if   spy_chg >  1.0: regimen = "Risk-ON fuerte"
-            elif spy_chg >  0.2: regimen = "Risk-ON"
-            elif spy_chg > -0.2: regimen = "Neutro"
-            elif spy_chg > -1.0: regimen = "Risk-OFF"
-            else:                regimen = "Risk-OFF fuerte"
-    except Exception as e:
-        print(f"  ⚠️ SPY error: {e}")
+        closes  = df["Close"]
+        volumes = df["Volume"]
 
-    try:
-        vix = yf.download("^VIX", period="5d", progress=False, auto_adjust=True)
-        if not vix.empty:
-            vix_val = round(float(vix["Close"].iloc[-1]), 1)
-    except Exception as e:
-        print(f"  ⚠️ VIX error: {e}")
+        precio      = float(closes.iloc[-1])
+        precio_prev = float(closes.iloc[-2])
 
-    print(f"  SPY: {spy_chg}% | VIX: {vix_val} | {regimen}")
+        if precio < CFG["min_price"]:
+            return None
+        vol_avg_60 = float(volumes.tail(60).mean())
+        if vol_avg_60 < CFG["min_vol_avg"]:
+            return None
 
-    # ── Descarga bulk S&P 500 ───────────────────────────────────
-    print(f"\n📊 Descargando {len(UNIVERSE)} tickers (bulk)...")
-    raw = yf.download(
-        UNIVERSE, period="6mo",
-        auto_adjust=True, progress=False
-    )
+        ret_d = (precio / precio_prev - 1) * 100
 
-    if raw.empty:
-        print("  ❌ Sin datos de yfinance")
-        return [], {}, spy_chg, vix_val, regimen
+        vol_today  = float(volumes.iloc[-1])
+        vol_avg_20 = float(volumes.tail(21).iloc[:-1].mean())
+        vol_ratio  = vol_today / vol_avg_20 if vol_avg_20 > 0 else 0
 
-    closes  = raw["Close"]
-    volumes = raw["Volume"]
+        ma50     = sma(closes, min(50, len(closes)))
+        ma200    = sma(closes, 200) if len(closes) >= 200 else None
+        high_52w = float(closes.tail(min(252, len(closes))).max())
+        low_52w  = float(closes.tail(min(252, len(closes))).min())
 
-    print(f"  ✅ {closes.shape[1]} tickers con datos | {len(closes)} sesiones")
+        rng = high_52w - low_52w
+        pos_52w = ((precio - low_52w) / rng * 100) if rng > 0 else 50
 
-    # ── Precio de hoy por ticker (para forward returns) ─────────
-    precios_hoy = {}
-    for t in closes.columns:
-        v = closes[t].dropna()
-        if not v.empty:
-            precios_hoy[t] = round(float(v.iloc[-1]), 2)
+        mom_5d  = (precio / float(closes.iloc[-6])  - 1) * 100 if len(closes) > 5 else 0
+        mom_20d = (precio / float(closes.iloc[-21]) - 1) * 100 if len(closes) > 20 else 0
 
-    # ── Detección de setups ─────────────────────────────────────
-    setups    = []
-    n_total   = 0
-    n_skipped = 0
+        rango_60d   = closes.tail(60)
+        rng_pct_60d = (rango_60d.max() / rango_60d.min() - 1) * 100 if rango_60d.min() > 0 else 100
+        dias_consolidacion = 60 if rng_pct_60d < 15 else 0
 
-    for ticker in closes.columns:
-        try:
-            c = closes[ticker].dropna()
-            v = volumes[ticker].dropna()
+        rsi_val = rsi(closes)
+        alpha   = ret_d - spy_ret_today if spy_ret_today is not None else None
 
-            if len(c) < 30: n_skipped += 1; continue
+        # ─── SCORES POR DETECTOR ────────────────────────────────
+        scores = {}
 
-            precio      = float(c.iloc[-1])
-            precio_prev = float(c.iloc[-2])
+        # 1. Volumen extremo
+        if   vol_ratio >= 10: scores["VOL_EXTREMO"] = 100
+        elif vol_ratio >= 5:  scores["VOL_EXTREMO"] = 75
+        elif vol_ratio >= 3:  scores["VOL_EXTREMO"] = 50
 
-            if precio < CFG["min_price"]:         n_skipped += 1; continue
-            if v.tail(20).mean() < CFG["min_vol_avg"]: n_skipped += 1; continue
+        # 2. Gap con continuación
+        open_today = float(df["Open"].iloc[-1])
+        gap_pct    = (open_today / precio_prev - 1) * 100
+        if abs(gap_pct) > 2 and abs(ret_d) > 2 and np.sign(gap_pct) == np.sign(ret_d):
+            scores["GAP_CONTINUATION"] = min(100, abs(gap_pct) * 15)
 
-            ret_d    = (precio / precio_prev - 1) * 100
-            ma50_val = sma(c, min(50, len(c)))
-            ma50_p   = sma(c.iloc[:-1], min(50, len(c)-1))
-            ma200_v  = sma(c, 200) if len(c) >= 200 else None
-            ma200_p  = sma(c.iloc[:-1], 200) if len(c) >= 201 else None
-            rsi_val  = calc_rsi(c)
-            rsi_prev = calc_rsi(c.iloc[:-1])
-            vol_r    = vol_ratio(v)
-            high52   = float(c.iloc[-min(252,len(c)):].max())
-            mom_1m   = ((precio / float(c.iloc[-22]) - 1)*100) if len(c) > 22 else None
-            alpha    = round(ret_d - spy_chg, 2) if spy_chg is not None else None
+        # 3. Nuevo máximo 52w con volumen
+        if precio >= high_52w * 0.995 and vol_ratio >= 1.5:
+            scores["NEW_52W_HIGH"] = min(100, vol_ratio * 20)
 
-            setup = None
+        # 4. Breakout tras consolidación
+        if dias_consolidacion >= 40 and abs(ret_d) > 3 and vol_ratio >= 2:
+            scores["CONSOLIDATION_BREAK"] = min(100, abs(ret_d) * 10 + vol_ratio * 5)
 
-            # MA50 BREAKOUT
-            if (ma50_val and ma50_p and
-                precio_prev < ma50_p and precio > ma50_val and
-                vol_r and vol_r >= CFG["ma50_vol_min"]):
-                setup = "MA50_BREAKOUT"
+        # 5. Divergencia vs mercado
+        if spy_ret_today is not None and alpha is not None:
+            if abs(alpha) > 3 and np.sign(ret_d) != np.sign(spy_ret_today):
+                scores["DIVERGENCIA"] = min(100, abs(alpha) * 8)
 
-            # RSI RECOVERY
-            elif (rsi_val and rsi_prev and
-                  rsi_prev <= CFG["rsi_oversold"] and
-                  rsi_val > CFG["rsi_oversold"] and ret_d > 0):
-                setup = "RSI_RECOVERY"
+        if not scores:
+            return None
 
-            # 52W HIGH
-            elif (precio >= high52 * CFG["high52_prox"] and
-                  mom_1m is not None and mom_1m > 5 and
-                  vol_r and vol_r >= 1.0):
-                setup = "52W_HIGH"
+        anomaly_score = max(scores.values())
+        n_signals     = len(scores)
+        if n_signals >= 2:
+            anomaly_score = min(100, anomaly_score + 10 * (n_signals - 1))
 
-            # VOLUME SURGE
-            elif vol_r and vol_r >= CFG["vol_surge"] and ret_d > 1.0:
-                setup = "VOLUME_SURGE"
-
-            # GOLDEN CROSS NEAR
-            elif (ma50_val and ma200_v and ma50_p and ma200_p and
-                  ma50_p < ma200_p and
-                  abs(ma50_val / ma200_v - 1) < CFG["golden_prox"] and
-                  ma50_val > ma50_p):
-                setup = "GOLDEN_CROSS_NEAR"
-
-            if setup:
-                setups.append({
-                    "fecha":           today,
-                    "dia_semana":      datetime.strptime(today, "%Y-%m-%d").strftime("%A"),
-                    "ticker":          ticker,
-                    "sector":          SECTOR_MAP.get(ticker, "Unknown"),
-                    "setup":           setup,
-                    "precio":          round(precio, 2),
-                    "ret_dia_pct":     round(ret_d, 2),
-                    "alpha_vs_spy":    alpha,
-                    "vol_ratio":       round(vol_r, 2) if vol_r else None,
-                    "rsi":             round(rsi_val, 1) if rsi_val else None,
-                    "ma50":            round(ma50_val, 2) if ma50_val else None,
-                    "ma200":           round(ma200_v, 2) if ma200_v else None,
-                    "vs_ma50_pct":     round((precio/ma50_val-1)*100, 2) if ma50_val else None,
-                    "vs_ma200_pct":    round((precio/ma200_v-1)*100, 2) if ma200_v else None,
-                    "mom_1m_pct":      round(mom_1m, 1) if mom_1m else None,
-                    "high_52w":        round(high52, 2),
-                    "spy_chg_pct":     spy_chg,
-                    "vix":             vix_val,
-                    "regimen":         regimen,
-                    "fwd_ret_3d_pct":  "",
-                    "fwd_ret_5d_pct":  "",
-                    "fwd_ret_10d_pct": "",
-                    "precio_3d":       "",
-                    "precio_5d":       "",
-                    "precio_10d":      "",
-                })
-                n_total += 1
-
-        except Exception:
-            n_skipped += 1
-            continue
-
-    print(f"  ✅ {n_total} setups detectados | {n_skipped} tickers sin datos suficientes")
-    return setups, precios_hoy, spy_chg, vix_val, regimen
+        return {
+            "ticker":         ticker,
+            "precio":         round(precio, 2),
+            "ret_dia_pct":    round(ret_d, 2),
+            "alpha":          round(alpha, 2) if alpha is not None else None,
+            "vol_ratio":      round(vol_ratio, 2),
+            "rsi":            round(rsi_val, 1) if rsi_val else None,
+            "pos_52w_pct":    round(pos_52w, 1),
+            "mom_5d":         round(mom_5d, 1),
+            "mom_20d":        round(mom_20d, 1),
+            "ma50":           round(ma50, 2) if ma50 else None,
+            "ma200":          round(ma200, 2) if ma200 else None,
+            "vs_ma50":        round((precio/ma50-1)*100, 1) if ma50 else None,
+            "high_52w":       round(high_52w, 2),
+            "vol_avg_60":     int(vol_avg_60),
+            "scores":         scores,
+            "anomaly_score":  round(anomaly_score, 1),
+            "n_signals":      n_signals,
+            "primary_signal": max(scores.items(), key=lambda x: x[1])[0],
+        }
+    except Exception:
+        return None
 
 
 # ╔══════════════════════════════════════════════════════════════╗
 # ║  EMAIL                                                       ║
 # ╚══════════════════════════════════════════════════════════════╝
-def enviar_email(setups: list, today: str, spy_chg, vix_val, regimen: str):
-    """Envía el resumen diario por Gmail SMTP."""
+def enviar_email(top, today, spy_chg, n_total, n_universe):
     if not EMAIL_FROM or not EMAIL_PASS:
-        print("  ⚠️ Gmail no configurado — saltando email")
+        print("  ⚠️ Gmail no configurado")
         return
 
-    by_setup = {}
-    for s in setups:
-        by_setup.setdefault(s["setup"], []).append(s)
-
-    emojis = {
-        "MA50_BREAKOUT": "📈", "RSI_RECOVERY": "🔄",
-        "52W_HIGH": "🏆", "VOLUME_SURGE": "🔊",
-        "GOLDEN_CROSS_NEAR": "✨"
+    signal_emojis = {
+        "VOL_EXTREMO":         "🔊",
+        "GAP_CONTINUATION":    "⚡",
+        "NEW_52W_HIGH":        "🏆",
+        "CONSOLIDATION_BREAK": "🚀",
+        "DIVERGENCIA":         "🌊",
+    }
+    signal_desc = {
+        "VOL_EXTREMO":         "Volumen extremo — institucional posiblemente entrando",
+        "GAP_CONTINUATION":    "Brecha + continuación — reacción a noticia",
+        "NEW_52W_HIGH":        "Nuevo máximo 52 semanas con volumen",
+        "CONSOLIDATION_BREAK": "Ruptura tras consolidación larga — energía acumulada",
+        "DIVERGENCIA":         "Diverge del mercado — algo específico del ticker",
     }
 
-    setups_html = ""
-    if not setups:
-        setups_html = "<p style='color:#888'>No se detectaron setups técnicos hoy.</p>"
+    if not top:
+        tickers_html = "<p style='color:#888;text-align:center;padding:30px'>No se detectaron anomalías hoy.</p>"
     else:
-        for setup, items in by_setup.items():
-            e = emojis.get(setup, "📊")
-            setups_html += f"<h3 style='color:#8be9fd'>{e} {setup} — {len(items)} señal(es)</h3><ul>"
-            for s in items[:5]:
-                alpha_str = f" | Alpha: {s['alpha_vs_spy']:+.2f}%" if s.get("alpha_vs_spy") is not None else ""
-                ret_str   = f"{s['ret_dia_pct']:+.2f}%"
-                setups_html += (f"<li><b>{s['ticker']}</b> ({s['sector']}) — "
-                                f"${s['precio']} | {ret_str}{alpha_str} | "
-                                f"RSI: {s['rsi'] or 'N/A'} | Vol: {s['vol_ratio'] or 'N/A'}x</li>")
-            setups_html += "</ul>"
+        tickers_html = ""
+        for i, r in enumerate(top, 1):
+            primary = r["primary_signal"]
+            emoji = signal_emojis.get(primary, "📊")
+            all_sigs = " + ".join([f"{signal_emojis.get(s,'•')} {s}" for s in r["scores"].keys()])
+            chg_color = "#2ecc71" if r["ret_dia_pct"] > 0 else "#e74c3c"
 
-    regimen_color = {
-        "Risk-ON fuerte": "#27ae60", "Risk-ON": "#2ecc71",
-        "Neutro": "#f39c12", "Risk-OFF": "#e74c3c",
-        "Risk-OFF fuerte": "#c0392b"
-    }.get(regimen, "#7f8c8d")
+            tickers_html += f"""
+<div style="background:#1e1e2e;border-left:3px solid #8be9fd;padding:14px;margin-bottom:12px;border-radius:4px">
+  <div style="display:flex;justify-content:space-between;align-items:center">
+    <div>
+      <span style="font-size:18px;font-weight:bold;color:#f8f8f2">#{i} {emoji} {r['ticker']}</span>
+      <span style="color:{chg_color};font-weight:bold;margin-left:10px">{r['ret_dia_pct']:+.2f}%</span>
+      <span style="color:#888;font-size:13px">  ${r['precio']}</span>
+    </div>
+    <div style="background:#44475a;padding:4px 10px;border-radius:12px;font-size:13px;color:#8be9fd">
+      Score: {r['anomaly_score']}/100
+    </div>
+  </div>
+  <div style="margin-top:8px;font-size:13px;color:#bbb">
+    <b>Señales:</b> {all_sigs}<br>
+    <b>Volumen:</b> ×{r['vol_ratio']} &nbsp;|&nbsp;
+    <b>RSI:</b> {r['rsi'] or 'N/A'} &nbsp;|&nbsp;
+    <b>Pos 52w:</b> {r['pos_52w_pct']}% &nbsp;|&nbsp;
+    <b>Mom 5d:</b> {r['mom_5d']}% &nbsp;|&nbsp;
+    <b>Mom 20d:</b> {r['mom_20d']}%
+  </div>
+  <div style="margin-top:6px;font-size:12px;color:#888;font-style:italic">
+    {signal_desc.get(primary, '')}
+  </div>
+</div>"""
 
-    spy_str = f"{spy_chg:+.2f}%" if spy_chg is not None else "N/A"
+    spy_str   = f"{spy_chg:+.2f}%" if spy_chg is not None else "N/A"
     spy_color = "#2ecc71" if (spy_chg or 0) >= 0 else "#e74c3c"
 
     html = f"""<!DOCTYPE html>
 <html><head><style>
-body{{font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#0d0d1a;color:#f8f8f2}}
-.hdr{{background:#1a1a2e;padding:20px;border-radius:8px 8px 0 0}}
-.hdr h1{{margin:0;font-size:20px}}
-.hdr p{{margin:5px 0 0;color:#888;font-size:13px}}
+body{{font-family:-apple-system,Arial,sans-serif;max-width:680px;margin:0 auto;background:#0d0d1a;color:#f8f8f2}}
+.hdr{{background:#1a1a2e;padding:22px;border-radius:8px 8px 0 0}}
+.hdr h1{{margin:0;font-size:22px}}
+.hdr p{{margin:6px 0 0;color:#888;font-size:13px}}
 .bar{{display:flex;gap:10px;padding:15px;background:#12121f}}
-.m{{flex:1;text-align:center;padding:10px;background:#1e1e2e;border-radius:6px}}
-.mv{{font-size:22px;font-weight:bold}}
-.ml{{font-size:11px;color:#888;margin-top:3px}}
-.cnt{{padding:20px;background:#12121f}}
+.m{{flex:1;text-align:center;padding:12px;background:#1e1e2e;border-radius:6px}}
+.mv{{font-size:24px;font-weight:bold}}
+.ml{{font-size:11px;color:#888;margin-top:4px}}
+.cnt{{padding:18px 22px;background:#12121f}}
+.cnt h2{{color:#8be9fd;font-size:17px;margin-top:0}}
 .ftr{{background:#1a1a2e;padding:12px;text-align:center;font-size:11px;color:#888;border-radius:0 0 8px 8px}}
 </style></head><body>
-<div class="hdr"><h1>📊 TFM — Agente de Mercado</h1><p>Resumen diario · {today}</p></div>
+<div class="hdr">
+  <h1>🔎 Agente de Descubrimiento</h1>
+  <p>Movimientos inusuales fuera del ruido mediático · {today}</p>
+</div>
 <div class="bar">
   <div class="m"><div class="mv" style="color:{spy_color}">{spy_str}</div><div class="ml">S&P 500</div></div>
-  <div class="m"><div class="mv">{vix_val or 'N/A'}</div><div class="ml">VIX</div></div>
-  <div class="m"><div class="mv">{len(setups)}</div><div class="ml">Setups</div></div>
-  <div class="m"><div class="mv" style="color:{regimen_color};font-size:13px">{regimen}</div><div class="ml">Régimen</div></div>
+  <div class="m"><div class="mv">{n_universe}</div><div class="ml">Analizados</div></div>
+  <div class="m"><div class="mv">{n_total}</div><div class="ml">Anomalías</div></div>
+  <div class="m"><div class="mv">{len(top)}</div><div class="ml">Top del día</div></div>
 </div>
 <div class="cnt">
-  <h2>🔍 Setups técnicos detectados hoy</h2>
-  {setups_html}
-  <hr style="border-color:#44475a"/>
-  <p style="font-size:11px;color:#888">
-    Señal estadística basada en patrones históricos — no es recomendación de inversión.<br>
-    Los retornos forward (+3/+5/+10 días) se actualizarán automáticamente.
+  <h2>🏆 Top {len(top)} — ordenados por anomaly score</h2>
+  {tickers_html}
+  <hr style="border-color:#44475a;margin:20px 0"/>
+  <p style="font-size:11px;color:#888;line-height:1.6">
+    <b>Cómo interpretar:</b> el universo excluye los 100 tickers más mencionados (S&P 100)
+    para forzar el descubrimiento. Los tickers aquí se están moviendo de forma inusual
+    pero probablemente <b>no están en titulares</b>. Siempre investiga la razón detrás
+    de cada señal antes de tomar decisiones.<br><br>
+    <b>Universo:</b> S&P 500 + S&P 400 + S&P 600, excluyendo megacaps populares.
   </p>
 </div>
 <div class="ftr">TFM — Plataforma de Inversión Inteligente · Master IA en Finanzas · VIU</div>
@@ -461,7 +372,7 @@ body{{font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#0d0
 
     try:
         msg = MIMEMultipart("alternative")
-        msg["Subject"] = f"📊 TFM Agente · {today} · SPY {spy_str} · {len(setups)} setups · {regimen}"
+        msg["Subject"] = f"🔎 Agente Descubrimiento · {today} · {len(top)} oportunidades · SPY {spy_str}"
         msg["From"]    = EMAIL_FROM
         msg["To"]      = EMAIL_TO
         msg.attach(MIMEText(html, "html"))
@@ -469,10 +380,9 @@ body{{font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#0d0
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(EMAIL_FROM, EMAIL_PASS)
             server.sendmail(EMAIL_FROM, EMAIL_TO, msg.as_string())
-
-        print(f"  ✅ Email enviado a {EMAIL_TO}")
+        print("  ✅ Email enviado")
     except Exception as e:
-        print(f"  ❌ Error enviando email: {e}")
+        print(f"  ❌ Error email: {e}")
 
 
 # ╔══════════════════════════════════════════════════════════════╗
@@ -480,39 +390,109 @@ body{{font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#0d0
 # ╚══════════════════════════════════════════════════════════════╝
 def main():
     today = datetime.now().strftime("%Y-%m-%d")
-    print(f"\n{'='*60}")
-    print(f"TFM AGENTE DIARIO — {today}")
-    print(f"{'='*60}")
+    print(f"\n{'='*70}")
+    print(f"TFM AGENTE DE DESCUBRIMIENTO — {today}")
+    print(f"{'='*70}\n")
 
-    # 1. Detectar setups
-    setups, precios_hoy, spy_chg, vix_val, regimen = detectar_setups(today)
+    # 1. SPY referencia
+    print("📡 Descargando SPY como referencia...")
+    spy_df = stooq_download("SPY", days=10)
+    spy_chg = None
+    if spy_df is not None and len(spy_df) >= 2:
+        spy_chg = round((float(spy_df["Close"].iloc[-1]) /
+                          float(spy_df["Close"].iloc[-2]) - 1) * 100, 2)
+    print(f"  SPY hoy: {spy_chg}%\n")
 
-    # 2. Google Sheets
-    if not GCP_CREDS:
-        print("\n⚠️  GOOGLE_SERVICE_ACCOUNT_JSON no configurado — saltando Sheets")
-    else:
-        print("\n📊 Conectando a Google Sheets...")
+    # 2. Universo
+    print("📋 Obteniendo universo de tickers...")
+    universe = get_universe()
+    print(f"\n  Universo final (excl. sobre-conocidos): {len(universe)} tickers\n")
+
+    # 3. Análisis ticker a ticker
+    print(f"📊 Analizando {len(universe)} tickers vía Stooq...")
+    print("  (Esto tarda ~8-12 minutos)\n")
+
+    resultados = []
+    n_ok = n_skip = n_error = 0
+
+    for i, ticker in enumerate(universe):
+        if (i + 1) % 100 == 0:
+            print(f"  {i+1}/{len(universe)} — {len(resultados)} anomalías")
+
+        df = stooq_download(ticker, days=120)
+        if df is None:
+            n_error += 1
+            continue
+
+        resultado = analizar_ticker(ticker, df, spy_chg)
+        if resultado:
+            resultados.append(resultado)
+            n_ok += 1
+        else:
+            n_skip += 1
+
+        time.sleep(0.15)
+
+    print(f"\n✅ Análisis completado")
+    print(f"   Anomalías: {n_ok} | Descartados: {n_skip} | Errores: {n_error}")
+
+    # 4. Top N
+    resultados.sort(key=lambda x: x["anomaly_score"], reverse=True)
+    top = resultados[:CFG["top_n_email"]]
+
+    print(f"\n🏆 TOP {len(top)} — MÁS INUSUALES DEL DÍA")
+    print("─" * 70)
+    for i, r in enumerate(top, 1):
+        signals_str = " + ".join(r["scores"].keys())
+        alpha_str = f" α={r['alpha']:+.1f}%" if r['alpha'] is not None else ""
+        print(f"  {i:2d}. {r['ticker']:<6} {r['ret_dia_pct']:+6.2f}%{alpha_str}  "
+              f"vol×{r['vol_ratio']:<4.1f}  score={r['anomaly_score']:5.1f}")
+        print(f"      [{signals_str}]")
+
+    # 5. Google Sheets
+    if GCP_CREDS and resultados:
+        print("\n📊 Guardando en Google Sheets...")
         try:
-            ws = conectar_sheets()
-            df = leer_sheet(ws)
-            print(f"  ✅ Sheet conectado — {len(df)} filas existentes")
+            creds = Credentials.from_service_account_info(
+                json.loads(GCP_CREDS),
+                scopes=["https://www.googleapis.com/auth/spreadsheets"]
+            )
+            client = gspread.authorize(creds)
+            sh = client.open_by_key(SHEET_ID)
 
-            print("\n🔄 Rellenando retornos forward pendientes...")
-            rellenar_forward_returns(ws, df, precios_hoy, today)
+            tab_name = "agente_anomalias"
+            try:
+                ws = sh.worksheet(tab_name)
+            except gspread.exceptions.WorksheetNotFound:
+                ws = sh.add_worksheet(title=tab_name, rows=10000, cols=30)
+                headers = ["fecha","ticker","precio","ret_dia_pct","alpha","vol_ratio",
+                           "rsi","pos_52w_pct","mom_5d","mom_20d","vs_ma50",
+                           "anomaly_score","primary_signal","all_signals","n_signals"]
+                ws.append_row(headers)
 
-            print("\n➕ Añadiendo setups de hoy...")
-            append_setups(ws, setups)
-
+            rows = []
+            for r in top:
+                rows.append([
+                    today, r["ticker"], r["precio"], r["ret_dia_pct"],
+                    r["alpha"] if r["alpha"] is not None else "",
+                    r["vol_ratio"], r["rsi"] if r["rsi"] else "",
+                    r["pos_52w_pct"], r["mom_5d"], r["mom_20d"],
+                    r["vs_ma50"] if r["vs_ma50"] else "",
+                    r["anomaly_score"], r["primary_signal"],
+                    " + ".join(r["scores"].keys()), r["n_signals"],
+                ])
+            ws.append_rows(rows, value_input_option="RAW")
+            print(f"  ✅ {len(rows)} filas añadidas a '{tab_name}'")
         except Exception as e:
-            print(f"  ❌ Error en Sheets: {e}")
+            print(f"  ❌ Error Sheets: {e}")
 
-    # 3. Email
-    print("\n📧 Enviando email resumen...")
-    enviar_email(setups, today, spy_chg, vix_val, regimen)
+    # 6. Email
+    print("\n📧 Enviando email...")
+    enviar_email(top, today, spy_chg, len(resultados), len(universe))
 
-    print(f"\n{'='*60}")
-    print(f"✅ COMPLETADO — {len(setups)} setups detectados")
-    print(f"{'='*60}\n")
+    print(f"\n{'='*70}")
+    print("✅ COMPLETADO")
+    print(f"{'='*70}\n")
 
 
 if __name__ == "__main__":
