@@ -2,10 +2,8 @@ name: TFM — Agente Diario de Mercado
 
 on:
   schedule:
-    # 17:30 ET = 21:30 UTC (horario verano) / 22:30 UTC (horario invierno)
-    # Usamos 21:35 UTC para asegurar que el mercado US está cerrado
     - cron: '35 21 * * 1-5'
-  workflow_dispatch:  # Permite ejecución manual desde GitHub
+  workflow_dispatch:
 
 jobs:
   run-agent:
@@ -26,7 +24,7 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install \
-            yfinance==0.2.40 \
+            requests==2.31.0 \
             pandas==2.2.2 \
             numpy==1.26.4 \
             gspread==6.1.2 \
@@ -37,6 +35,7 @@ jobs:
           GMAIL_USER:                   ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD:           ${{ secrets.GMAIL_APP_PASSWORD }}
           GOOGLE_SERVICE_ACCOUNT_JSON:  ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          FMP_KEY:                      ${{ secrets.FMP_KEY }}
         run: |
           python agent_daily_update.py
 
