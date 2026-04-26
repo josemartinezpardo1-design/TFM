@@ -15,17 +15,10 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
-import requests, time, json, math as _math
+import requests, time
 from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings("ignore")
-
-try:
-    import torch
-    import torch.nn as nn
-    TORCH_OK = True
-except Exception:
-    TORCH_OK = False
 
 st.set_page_config(page_title="TFM — Investment Intelligence", page_icon="📊", layout="wide")
 
@@ -561,10 +554,132 @@ def get_dax():
             "BAS.DE","BMW.DE","IFX.DE","BEI.DE","BAYN.DE","ADS.DE","VOW3.DE",
             "DB1.DE","RWE.DE","CON.DE","DBK.DE","MRK.DE","SHL.DE"]
 
+@st.cache_data(ttl=86400)
+def get_sp400():
+    try:
+        html = requests.get("https://en.wikipedia.org/wiki/List_of_S%26P_400_companies",
+                            headers={"User-Agent": "Mozilla/5.0"}, timeout=10).text
+        t = pd.read_html(html)
+        for df in t:
+            for col in df.columns:
+                if "symbol" in str(col).lower() or "ticker" in str(col).lower():
+                    return [x.replace(".", "-") for x in df[col].dropna().astype(str).tolist()]
+    except Exception:
+        pass
+    return ["MUSA","SLGN","HLI","CVCO","UBSI","HOMB","WSFS","INDB","SFNC","FFIN"]
+
+@st.cache_data(ttl=86400)
+def get_sp600():
+    try:
+        html = requests.get("https://en.wikipedia.org/wiki/List_of_S%26P_600_companies",
+                            headers={"User-Agent": "Mozilla/5.0"}, timeout=10).text
+        t = pd.read_html(html)
+        for df in t:
+            for col in df.columns:
+                if "symbol" in str(col).lower() or "ticker" in str(col).lower():
+                    return [x.replace(".", "-") for x in df[col].dropna().astype(str).tolist()]
+    except Exception:
+        pass
+    return ["ACVA","AMBA","CENT","CEVA","DIOD","DORM","IOSP","KALU","MGEE","NBTB"]
+
+@st.cache_data(ttl=86400)
+def get_nasdaq100():
+    try:
+        html = requests.get("https://en.wikipedia.org/wiki/Nasdaq-100",
+                            headers={"User-Agent": "Mozilla/5.0"}, timeout=10).text
+        t = pd.read_html(html)
+        for df in t:
+            for col in df.columns:
+                if "ticker" in str(col).lower() or "symbol" in str(col).lower():
+                    tks = df[col].dropna().astype(str).tolist()
+                    if len(tks) > 50:
+                        return [x.replace(".", "-") for x in tks]
+    except Exception:
+        pass
+    return ["AAPL","MSFT","NVDA","GOOGL","META","AMZN","TSLA","AVGO","COST","NFLX",
+            "AMD","QCOM","INTU","AMAT","ISRG","ADI","MU","LRCX","KLAC","SNPS"]
+
+@st.cache_data(ttl=86400)
+def get_cac40():
+    return ["MC.PA","TTE.PA","SAN.PA","AI.PA","OR.PA","BNP.PA","STLA.PA","SU.PA",
+            "AIR.PA","RI.PA","DG.PA","ORA.PA","KER.PA","CS.PA","AXA.PA","VIE.PA",
+            "SGO.PA","DSY.PA","EL.PA","BN.PA","CAP.PA","LR.PA","STM.PA","ATO.PA",
+            "RMS.PA","ML.PA","TEP.PA","VIV.PA","GLE.PA","CA.PA","ENGI.PA","PUB.PA",
+            "SAF.PA","FR.PA","URW.PA","AF.PA","SG.PA","HO.PA","ALO.PA","TFI.PA"]
+
+@st.cache_data(ttl=86400)
+def get_eurostoxx50():
+    return ["ASML.AS","LVMH.PA","TTE.PA","SAP.DE","SAN.PA","SIE.DE","AIR.PA",
+            "IDEXY","ALV.DE","BNP.PA","AI.PA","OR.PA","ABI.BR","MBG.DE","ING.AS",
+            "DTE.DE","STLA.PA","SU.PA","BMW.DE","AXA.PA","DG.PA","BAS.DE","AIR.DE",
+            "ENEL.MI","ENI.MI","ISP.MI","UCG.MI","INGA.AS","PHG.AS","CS.PA",
+            "KER.PA","RI.PA","ORA.PA","VIE.PA","SGO.PA","DSY.PA","STM.PA","VOW3.DE",
+            "RWE.DE","PHIA.AS","AD.AS","MT.AS","CRH","EL.PA","ATO.PA","ADS.DE",
+            "DB1.DE","IFX.DE","ALO.PA","SAF.PA"]
+
+@st.cache_data(ttl=86400)
+def get_ftse100():
+    return ["AZN.L","SHEL.L","HSBA.L","ULVR.L","BP.L","RIO.L","GSK.L","REL.L",
+            "NG.L","LSEG.L","BATS.L","DGE.L","CPG.L","RKT.L","VOD.L","LLOY.L",
+            "BARC.L","NWG.L","STAN.L","ABF.L","IHG.L","WTB.L","LAND.L","SBRY.L",
+            "TSCO.L","MKS.L","JD.L","EZJ.L","IAG.L","RR.L","BA.L","WEIR.L",
+            "HLMA.L","SDR.L","CRDA.L","MNDI.L","SMDS.L","EXPN.L","SAGE.L","AUTO.L",
+            "SPX.L","SMIN.L","IMB.L","GLEN.L","BHP.L","AAL.L","ANTO.L","CNA.L",
+            "SVT.L","UU.L","SSE.L","PNN.L","NXT.L","OCDO.L","HWDN.L","MRO.L"]
+
+@st.cache_data(ttl=86400)
+def get_spi():
+    """Swiss Performance Index — principales valores del SIX Swiss Exchange."""
+    return ["NESN.SW","ROG.SW","NOVN.SW","ALC.SW","UHR.SW","CFR.SW","ZURN.SW",
+            "ABBN.SW","GIVN.SW","LOGN.SW","SIKA.SW","GEBN.SW","LONN.SW","LHN.SW",
+            "BUCN.SW","CSGN.SW","UBSG.SW","BRKN.SW","PGHN.SW","BARN.SW","SLHN.SW",
+            "VACN.SW","SREN.SW","BAER.SW","COTN.SW","TEMN.SW","DKSH.SW","SOFN.SW",
+            "ARBN.SW","LISN.SW","SCMN.SW","MBTN.SW","EMMN.SW","HELN.SW","KARN.SW",
+            "BCGE.SW","BCVN.SW","BKW.SW","BOBN.SW","CAG.SW","CLAN.SW","COHN.SW",
+            "DLKN.SW","EMSN.SW","FHZN.SW","HIAG.SW","HUBN.SW","INRN.SW","JOEL.SW",
+            "KNIN.SW","LAHN.SW","MCHN.SW","MOBN.SW","NBEN.SW","OBDC.SW","PEAN.SW"]
+
+@st.cache_data(ttl=86400)
+def get_nikkei225():
+    """Nikkei 225 — principales valores de la Bolsa de Tokio."""
+    return ["7203.T","9984.T","6861.T","8306.T","6758.T","6501.T","7267.T",
+            "9432.T","8316.T","6702.T","4063.T","9433.T","7751.T","8035.T",
+            "6954.T","4661.T","2914.T","9022.T","7832.T","4519.T","6367.T",
+            "8031.T","6098.T","7011.T","5401.T","4503.T","9021.T","8411.T",
+            "3382.T","2802.T","4452.T","6471.T","9531.T","5108.T","8801.T",
+            "1925.T","9201.T","9101.T","7733.T","6146.T","4568.T","4901.T",
+            "8802.T","3407.T","5713.T","7741.T","6645.T","4523.T","8309.T","6302.T"]
+
+@st.cache_data(ttl=86400)
+def get_russell1000():
+    try:
+        url = "https://en.wikipedia.org/wiki/Russell_1000_Index"
+        html = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10).text
+        t = pd.read_html(html)
+        for df in t:
+            for col in df.columns:
+                if "ticker" in str(col).lower() or "symbol" in str(col).lower():
+                    tks = df[col].dropna().astype(str).tolist()
+                    if len(tks) > 100:
+                        return [x.replace(".", "-") for x in tks]
+    except Exception:
+        pass
+    # Fallback: S&P 500 como proxy
+    return get_sp500()
+
 INDICES = {
-    "SP500":  ("S&P 500", get_sp500),
-    "IBEX35": ("IBEX 35", get_ibex),
-    "DAX40":  ("DAX 40",  get_dax),
+    "SP500":      ("🇺🇸 S&P 500",         get_sp500),
+    "SP400":      ("🇺🇸 S&P 400 MidCap",  get_sp400),
+    "SP600":      ("🇺🇸 S&P 600 SmallCap",get_sp600),
+    "NASDAQ100":  ("🇺🇸 Nasdaq 100",       get_nasdaq100),
+    "RUSSELL1000":("🇺🇸 Russell 1000",     get_russell1000),
+    "IBEX35":     ("🇪🇸 IBEX 35",          get_ibex),
+    "DAX40":      ("🇩🇪 DAX 40",           get_dax),
+    "FTSE100":    ("🇬🇧 FTSE 100",         get_ftse100),
+    "CAC40":      ("🇫🇷 CAC 40",           get_cac40),
+    "EUROSTOXX50":("🇪🇺 EuroStoxx 50",     get_eurostoxx50),
+    "SPI":        ("🇨🇭 SPI (Suiza)",      get_spi),
+    "NIKKEI225":  ("🇯🇵 Nikkei 225",       get_nikkei225),
 }
 
 CL = {"COMPRAR": "#50fa7b", "VIGILAR": "#8be9fd", "NEUTRO": "#f1fa8c", "EVITAR": "#ff5555"}
@@ -860,255 +975,6 @@ def recomendar_sectores(sector_weights_pct: dict, profile: str,
 
 
 # ╔═══════════════════════════════════════════════════════════════╗
-# ║  PREDICCIÓN IA — MODELOS & FUNCIONES                         ║
-# ╚═══════════════════════════════════════════════════════════════╝
-
-# Mapeo: cualquier ticker → modelo más apropiado de los entrenados
-# Lógica: las features son todas normalizadas y genéricas (RSI, MA ratios,
-# log-ret...) → el modelo captura patrones de comportamiento de precio,
-# no características específicas del activo.
-TICKER_TO_MODEL = {
-    # Tecnología / Nasdaq-heavy
-    "AAPL":"QQQ","MSFT":"QQQ","NVDA":"QQQ","GOOGL":"QQQ","META":"QQQ",
-    "AMZN":"QQQ","TSLA":"QQQ","AMD":"QQQ","INTC":"QQQ","CSCO":"QQQ",
-    "QQQ":"QQQ",
-    # Oro / activos refugio
-    "GLD":"GLD","IAU":"GLD","GOLD":"GLD","NEM":"GLD","SLV":"GLD",
-    # Bonos / renta fija
-    "TLT":"IEF","SHY":"IEF","BND":"IEF","AGG":"IEF","LQD":"IEF",
-    "IEF":"IEF","HYG":"IEF","EMB":"IEF",
-    # Materias primas / commodities
-    "DBC":"DBC","USO":"DBC","UNG":"DBC","PDBC":"DBC","BCI":"DBC",
-    # Índices amplios / acciones generales → SPY como proxy
-    "SPY":"SPY",
-}
-
-def seleccionar_modelo(ticker: str, registry: dict) -> tuple:
-    """
-    Devuelve (modelo_ticker, razon) para cualquier ticker libre.
-    Primero busca coincidencia exacta en el registry (los 5 entrenados),
-    luego en el mapeo de afinidad, y por defecto usa SPY.
-    """
-    t = ticker.upper().strip()
-    # 1. Está directamente en los modelos entrenados
-    if t in registry:
-        return t, f"Modelo entrenado específicamente para **{t}**"
-    # 2. Mapeo por afinidad
-    if t in TICKER_TO_MODEL:
-        proxy = TICKER_TO_MODEL[t]
-        return proxy, f"Sin modelo propio para {t} → usando **{proxy}** (alta correlación por tipo de activo)"
-    # 3. Heurísticas por sufijo (mercados europeos, etc.)
-    if t.endswith(".MC") or t.endswith(".DE") or t.endswith(".MI") or t.endswith(".PA"):
-        return "SPY", f"Acción europea → usando **SPY** como proxy de comportamiento de mercado amplio"
-    if t.endswith(".SA"):
-        return "DBC", f"Mercado emergente/Brasil → usando **DBC** como proxy de activos de mayor volatilidad"
-    # 4. Default
-    return "SPY", f"Sin clasificación específica para {t} → usando **SPY** (mercado amplio, fallback conservador)"
-
-
-if TORCH_OK:
-    class _LSTMModel(nn.Module):
-        def __init__(self, n_feat, hidden, n_layers, dropout):
-            super().__init__()
-            self.lstm = nn.LSTM(n_feat, hidden, num_layers=n_layers,
-                                batch_first=True,
-                                dropout=dropout if n_layers > 1 else 0)
-            self.fc = nn.Linear(hidden, 1)
-        def forward(self, x):
-            out, _ = self.lstm(x)
-            return self.fc(out[:, -1, :]).squeeze(-1)
-
-    class _GRUModel(nn.Module):
-        def __init__(self, n_feat, hidden, n_layers, dropout):
-            super().__init__()
-            self.gru = nn.GRU(n_feat, hidden, num_layers=n_layers,
-                              batch_first=True,
-                              dropout=dropout if n_layers > 1 else 0)
-            self.fc = nn.Linear(hidden, 1)
-        def forward(self, x):
-            out, _ = self.gru(x)
-            return self.fc(out[:, -1, :]).squeeze(-1)
-
-    class _RNNModel(nn.Module):
-        def __init__(self, n_feat, hidden, n_layers, dropout):
-            super().__init__()
-            self.rnn = nn.RNN(n_feat, hidden, num_layers=n_layers,
-                              batch_first=True,
-                              dropout=dropout if n_layers > 1 else 0)
-            self.fc = nn.Linear(hidden, 1)
-        def forward(self, x):
-            out, _ = self.rnn(x)
-            return self.fc(out[:, -1, :]).squeeze(-1)
-
-    class _PositionalEncoding(nn.Module):
-        def __init__(self, d_model, max_len=500):
-            super().__init__()
-            pe  = torch.zeros(max_len, d_model)
-            pos = torch.arange(0, max_len).unsqueeze(1).float()
-            div = torch.exp(torch.arange(0, d_model, 2).float()
-                            * (-_math.log(10000.0) / d_model))
-            pe[:, 0::2] = torch.sin(pos * div)
-            pe[:, 1::2] = torch.cos(pos * div)
-            self.register_buffer('pe', pe.unsqueeze(0))
-        def forward(self, x):
-            return x + self.pe[:, :x.size(1), :]
-
-    class _TransformerModel(nn.Module):
-        def __init__(self, n_feat, hidden, n_layers, dropout, n_heads):
-            super().__init__()
-            self.proj    = nn.Linear(n_feat, hidden)
-            self.pe      = _PositionalEncoding(hidden)
-            enc_layer    = nn.TransformerEncoderLayer(
-                d_model=hidden, nhead=n_heads, dim_feedforward=hidden * 4,
-                dropout=dropout, batch_first=True, activation='gelu')
-            self.encoder = nn.TransformerEncoder(enc_layer, num_layers=n_layers)
-            self.fc      = nn.Linear(hidden, 1)
-        def forward(self, x):
-            x    = self.pe(self.proj(x))
-            mask = nn.Transformer.generate_square_subsequent_mask(
-                       x.size(1)).to(x.device)
-            x    = self.encoder(x, mask=mask)
-            return self.fc(x[:, -1, :]).squeeze(-1)
-
-    class _MLPModel(nn.Module):
-        def __init__(self, input_dim, hidden, dropout):
-            super().__init__()
-            self.net = nn.Sequential(
-                nn.Linear(input_dim, hidden), nn.ReLU(), nn.Dropout(dropout),
-                nn.Linear(hidden, hidden),    nn.ReLU(), nn.Dropout(dropout),
-                nn.Linear(hidden, 1)
-            )
-        def forward(self, x):
-            return self.net(x).squeeze(-1)
-
-
-@st.cache_resource
-def cargar_registry():
-    try:
-        with open("model_registry.json", "r") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return None
-
-
-@st.cache_resource
-def cargar_modelo_cached(modelo_ticker: str, registry_json: str):
-    """Carga y cachea un modelo PyTorch. registry_json es string para hashear."""
-    if not TORCH_OK:
-        return None, "PyTorch no disponible"
-    registry = json.loads(registry_json)
-    if modelo_ticker not in registry:
-        return None, f"{modelo_ticker} no en registry"
-    meta = registry[modelo_ticker]
-    mn, h, nl = meta["model_name"], meta["hidden"], meta["n_layers"]
-    do, nh, nf = meta["dropout"], meta["n_heads"], meta["n_features"]
-    try:
-        if   mn == "MLP":         model = _MLPModel(meta["win_mlp"] * nf, h, do)
-        elif mn == "Transformer": model = _TransformerModel(nf, h, nl, do, nh)
-        elif mn == "LSTM":        model = _LSTMModel(nf, h, nl, do)
-        elif mn == "GRU":         model = _GRUModel(nf, h, nl, do)
-        elif mn == "RNN":         model = _RNNModel(nf, h, nl, do)
-        else: return None, f"Arquitectura {mn} desconocida"
-        state = torch.load(meta["file"], map_location="cpu", weights_only=True)
-        model.load_state_dict(state)
-        model.eval()
-        return model, meta
-    except Exception as e:
-        return None, str(e)
-
-
-def build_features_app(ticker: str):
-    """
-    Replica exactamente build_features() del notebook.
-    Devuelve (DataFrame 10 features, None) o (None, msg_error).
-    """
-    FEATURE_COLS = [
-        'log_ret','ma_5_ratio','ma_10_ratio','ma_20_ratio',
-        'vol_norm','rsi_norm','realized_vol','momentum_10','VIX','SPREAD'
-    ]
-    try:
-        h, _ = descargar(ticker, "6mo")
-        if h.empty or len(h) < 60:
-            return None, f"Datos insuficientes ({len(h)} sesiones)"
-
-        df = h[["Open","High","Low","Close","Volume"]].copy()
-        df.columns = ["open","high","low","close","volume"]
-
-        df["log_ret"]      = np.log(df["close"] / df["close"].shift(1))
-        for w in [5, 10, 20]:
-            df[f"ma_{w}_ratio"] = df["close"] / df["close"].rolling(w).mean() - 1
-        df["vol_norm"]     = df["volume"] / df["volume"].rolling(20).mean()
-        delta = df["close"].diff()
-        gain  = delta.clip(lower=0).rolling(14).mean()
-        loss  = (-delta.clip(upper=0)).rolling(14).mean()
-        rs    = gain / loss.replace(0, 1e-10)
-        df["rsi_norm"]     = (100 - 100 / (1 + rs)) / 100
-        df["realized_vol"] = df["log_ret"].rolling(20).std() * np.sqrt(252)
-        df["momentum_10"]  = df["close"].pct_change(10)
-
-        # VIX
-        try:
-            hv, _ = descargar("^VIX", "6mo")
-            df = df.join(hv["Close"].rename("VIX"), how="left")
-            df["VIX"] = df["VIX"].ffill()
-        except Exception:
-            df["VIX"] = 20.0
-
-        # SPREAD 10Y-2Y
-        spread_ok = False
-        if fred_client:
-            try:
-                y10 = fred_client.get_series("DGS10", observation_start="2024-01-01").dropna()
-                y2  = fred_client.get_series("DGS2",  observation_start="2024-01-01").dropna()
-                if not y10.empty and not y2.empty:
-                    df = df.join((y10 - y2).rename("SPREAD"), how="left")
-                    df["SPREAD"] = df["SPREAD"].ffill()
-                    spread_ok = True
-            except Exception:
-                pass
-        if not spread_ok:
-            try:
-                tnx, _ = descargar("^TNX", "6mo")
-                irx, _ = descargar("^IRX", "6mo")
-                if not tnx.empty and not irx.empty:
-                    df = df.join(
-                        (tnx["Close"]/10 - irx["Close"]/10).rename("SPREAD"), how="left")
-                    df["SPREAD"] = df["SPREAD"].ffill()
-                else:
-                    df["SPREAD"] = 0.5
-            except Exception:
-                df["SPREAD"] = 0.5
-
-        df = df[FEATURE_COLS].dropna()
-        if len(df) < 30:
-            return None, f"Solo {len(df)} filas tras limpiar NaN (mínimo 30)"
-        return df, None
-    except Exception as e:
-        return None, str(e)
-
-
-def predecir_senal(model, meta: dict, features_df: pd.DataFrame) -> dict:
-    """Normaliza + inferencia. Devuelve dict con probabilidad y señal."""
-    WIN    = meta["win_seq"]
-    FCOLS  = meta["feature_cols"]
-    X_raw  = features_df[FCOLS].values[-WIN:]
-    mean   = np.array(meta["scaler_mean"])
-    scale  = np.array(meta["scaler_scale"])
-    X_norm = (X_raw - mean) / scale
-    X_t    = torch.FloatTensor(X_norm).unsqueeze(0)  # (1, 30, 10)
-    with torch.no_grad():
-        logit = model(X_t).item()
-    prob_alc  = 1 / (1 + np.exp(-logit))
-    confianza = abs(prob_alc - 0.5) * 2
-    return {
-        "prob_alcista": round(prob_alc, 4),
-        "prob_bajista": round(1 - prob_alc, 4),
-        "signal":       "📈 ALCISTA" if prob_alc > 0.5 else "📉 BAJISTA",
-        "confianza":    round(confianza, 4),
-    }
-
-
-# ╔═══════════════════════════════════════════════════════════════╗
 # ║  SIDEBAR                                                      ║
 # ╚═══════════════════════════════════════════════════════════════╝
 with st.sidebar:
@@ -1118,10 +984,10 @@ with st.sidebar:
     pagina = st.radio("Módulo", [
         "🌅 Outlook",
         "🔍 Screener",
+        "🔎 Descubrimiento",
         "📈 Análisis Individual",
         "💼 Cartera",
         "📊 Macro",
-        "🔮 Predicción IA",
         "🤖 Research",
     ])
     st.divider()
@@ -1286,6 +1152,453 @@ elif pagina == "🔍 Screener":
     else:
         st.info("👈 Configura y pulsa **Ejecutar**.")
 
+
+
+
+# ╔═══════════════════════════════════════════════════════════════╗
+# ║  DESCUBRIMIENTO DE MERCADO                                    ║
+# ╚═══════════════════════════════════════════════════════════════╝
+elif pagina == "🔎 Descubrimiento":
+    st.header("🔎 Agente de Descubrimiento de Mercado")
+    st.markdown("Detecta movimientos inusuales en **tickers que no están en el foco mediático**. "
+                "Elige el universo, los filtros y el tipo de anomalía que buscas.")
+
+    # ── Controles en sidebar ─────────────────────────────────────
+    with st.sidebar:
+        st.markdown("### ⚙️ Configuración")
+
+        indices_sel = st.multiselect(
+            "Índices a analizar",
+            options=list(INDICES.keys()),
+            default=["SP500"],
+            format_func=lambda x: INDICES[x][0]
+        )
+
+        n_activos = st.slider(
+            "Nº máx. activos a analizar",
+            min_value=50, max_value=500, value=150, step=50,
+            help="Más activos = análisis más completo pero más lento"
+        )
+
+        señales_sel = st.multiselect(
+            "Tipos de anomalía",
+            options=["VOL_EXTREMO", "GAP_CONTINUATION", "NEW_52W_HIGH",
+                     "CONSOLIDATION_BREAK", "DIVERGENCIA"],
+            default=["VOL_EXTREMO", "GAP_CONTINUATION", "NEW_52W_HIGH",
+                     "CONSOLIDATION_BREAK", "DIVERGENCIA"],
+            help="Selecciona qué tipo de movimientos quieres detectar"
+        )
+
+        st.divider()
+        col_f1, col_f2 = st.columns(2)
+        with col_f1:
+            min_precio = st.number_input("Precio mín. ($)", value=5.0, min_value=0.5, step=0.5)
+        with col_f2:
+            min_vol = st.number_input("Vol. mín. (k)", value=300, min_value=50, step=50,
+                                       help="Volumen medio 20d mínimo en miles")
+
+        excluir_conocidos = st.checkbox(
+            "Excluir megacaps (S&P 100)",
+            value=True,
+            help="Excluye AAPL, NVDA, TSLA, etc. para forzar el descubrimiento"
+        )
+
+        top_n = st.slider("Top resultados", min_value=5, max_value=30, value=10)
+
+        st.divider()
+        analizar_btn = st.button("🚀 Analizar ahora", type="primary",
+                                  use_container_width=True)
+
+    # ── Tickers a excluir (S&P 100 sobreconocidos) ──────────────
+    EXCLUIR_MEGACAPS = {
+        "AAPL","MSFT","NVDA","GOOGL","GOOG","AMZN","META","TSLA","AVGO","BRK-B",
+        "JPM","LLY","V","XOM","UNH","MA","HD","PG","JNJ","COST","NFLX","BAC",
+        "ORCL","ABBV","CVX","KO","WMT","MRK","ADBE","CRM","PEP","TMO","LIN",
+        "ACN","CSCO","MCD","DIS","AMD","ABT","IBM","INTC","PFE","NOW","TXN",
+        "WFC","DHR","AXP","QCOM","NEE","AMGN","VZ","CMCSA","T","PM","GE","RTX",
+        "CAT","SPGI","GS","MS","UBER","BLK","PYPL","SBUX","NKE","BKNG","PLD",
+        "GILD","LOW","TJX","DE","SYK","ADP","MDT","LMT","MMC","ETN","PGR",
+        "BSX","CB","ISRG","VRTX","CI","SO","FI","DUK","KLAC","INTU","SCHW",
+        "BMY","AMAT","ANET","HON","AMT","CRWD","REGN","PANW","ELV","TMUS","FDX"
+    }
+
+    # ── Función de detección de anomalías ────────────────────────
+    def detectar_anomalia(hist, info, spy_chg, señales_activas):
+        """Analiza un ticker y retorna su score de anomalía."""
+        try:
+            if hist.empty or len(hist) < 30:
+                return None
+
+            closes  = hist["Close"]
+            volumes = hist["Volume"]
+            precio  = float(closes.iloc[-1])
+            prev_c  = float(closes.iloc[-2])
+
+            ret_d     = (precio / prev_c - 1) * 100
+            vol_hoy   = float(volumes.iloc[-1])
+            vol_avg20 = float(volumes.tail(21).iloc[:-1].mean())
+            vol_ratio = vol_hoy / vol_avg20 if vol_avg20 > 0 else 0
+
+            # MAs
+            n50      = min(50, len(closes))
+            ma50_val = float(closes.tail(n50).mean())
+            ma200_v  = float(closes.tail(200).mean()) if len(closes) >= 200 else None
+
+            # 52w
+            high_52w = float(closes.tail(min(252, len(closes))).max())
+            low_52w  = float(closes.tail(min(252, len(closes))).min())
+            rng_52w  = high_52w - low_52w
+            pos_52w  = ((precio - low_52w) / rng_52w * 100) if rng_52w > 0 else 50
+
+            # Momentum
+            mom_5d  = (precio / float(closes.iloc[-6])  - 1) * 100 if len(closes) > 5  else 0
+            mom_20d = (precio / float(closes.iloc[-21]) - 1) * 100 if len(closes) > 20 else 0
+
+            # Consolidación
+            rng_60  = closes.tail(60)
+            consol  = 60 if (rng_60.max() / rng_60.min() - 1) * 100 < 15 else 0
+
+            # RSI
+            rsi_val = None
+            try:
+                rsi_s   = calc_rsi(closes)
+                rsi_val = float(rsi_s.iloc[-1]) if not pd.isna(rsi_s.iloc[-1]) else None
+            except Exception:
+                pass
+
+            # Alpha vs SPY
+            alpha = round(ret_d - spy_chg, 2) if spy_chg is not None else None
+
+            # Gap apertura
+            open_h  = float(hist["Open"].iloc[-1]) if "Open" in hist.columns else precio
+            gap_pct = (open_h / prev_c - 1) * 100 if prev_c > 0 else 0
+
+            # ── SCORES ──────────────────────────────────────────
+            scores = {}
+
+            if "VOL_EXTREMO" in señales_activas:
+                if   vol_ratio >= 10: scores["VOL_EXTREMO"] = 100
+                elif vol_ratio >= 5:  scores["VOL_EXTREMO"] = 75
+                elif vol_ratio >= 3:  scores["VOL_EXTREMO"] = 50
+
+            if "GAP_CONTINUATION" in señales_activas:
+                if (abs(gap_pct) > 2 and abs(ret_d) > 2 and
+                        np.sign(gap_pct) == np.sign(ret_d)):
+                    scores["GAP_CONTINUATION"] = min(100, abs(gap_pct) * 15)
+
+            if "NEW_52W_HIGH" in señales_activas:
+                if precio >= high_52w * 0.995 and vol_ratio >= 1.5:
+                    scores["NEW_52W_HIGH"] = min(100, vol_ratio * 20)
+
+            if "CONSOLIDATION_BREAK" in señales_activas:
+                if consol >= 40 and abs(ret_d) > 3 and vol_ratio >= 2:
+                    scores["CONSOLIDATION_BREAK"] = min(100, abs(ret_d)*10 + vol_ratio*5)
+
+            if "DIVERGENCIA" in señales_activas and spy_chg is not None and alpha is not None:
+                if abs(alpha) > 3 and np.sign(ret_d) != np.sign(spy_chg):
+                    scores["DIVERGENCIA"] = min(100, abs(alpha) * 8)
+
+            if not scores:
+                return None
+
+            n_sig = len(scores)
+            score = min(100, max(scores.values()) + 10 * (n_sig - 1))
+
+            return {
+                "Ticker":       ticker_d,
+                "Precio":       round(precio, 2),
+                "Cambio %":     round(ret_d, 2),
+                "Alpha":        alpha,
+                "Vol×":         round(vol_ratio, 2),
+                "RSI":          round(rsi_val, 1) if rsi_val else None,
+                "Pos 52w %":    round(pos_52w, 1),
+                "Mom 5d %":     round(mom_5d, 1),
+                "Mom 20d %":    round(mom_20d, 1),
+                "vs MA50 %":    round((precio/ma50_val-1)*100, 1) if ma50_val else None,
+                "Score":        round(score, 1),
+                "Señales":      " + ".join(scores.keys()),
+                "Principal":    max(scores.items(), key=lambda x: x[1])[0],
+                "_scores":      scores,
+                "_n_signals":   n_sig,
+            }
+        except Exception:
+            return None
+
+    # ── Estado inicial ───────────────────────────────────────────
+    if not analizar_btn:
+        # Mostrar info de índices disponibles
+        st.markdown("### 📋 Índices disponibles")
+        cols_idx = st.columns(4)
+        for i, (k, (nombre, _)) in enumerate(INDICES.items()):
+            cols_idx[i % 4].markdown(f"**{nombre}**")
+
+        st.divider()
+        st.info("⬅️ Configura los parámetros en el panel izquierdo y pulsa **🚀 Analizar ahora**")
+
+        st.markdown("### 🔍 ¿Qué detecta cada señal?")
+        señal_info = {
+            "🔊 VOL_EXTREMO":         "Volumen ≥3x/5x/10x la media de 20 días. Indica interés institucional inusual.",
+            "⚡ GAP_CONTINUATION":    "Brecha de apertura >2% que continúa en la misma dirección. Reacción fuerte a noticia.",
+            "🏆 NEW_52W_HIGH":        "Precio en zona de máximo de 52 semanas con volumen. Ruptura de resistencia clave.",
+            "🚀 CONSOLIDATION_BREAK": "Ruptura tras 40+ días en rango estrecho (<15%). Energía acumulada liberada.",
+            "🌊 DIVERGENCIA":         "Sube >3% sobre el SPY cuando el mercado cae (o viceversa). Catalizador idiosincrático.",
+        }
+        for señal, desc in señal_info.items():
+            st.markdown(f"**{señal}:** {desc}")
+
+    else:
+        # ── ANÁLISIS ────────────────────────────────────────────
+        if not indices_sel:
+            st.warning("Selecciona al menos un índice en el panel izquierdo.")
+            st.stop()
+        if not señales_sel:
+            st.warning("Selecciona al menos un tipo de anomalía.")
+            st.stop()
+
+        # 1. Construir universo
+        with st.spinner("📋 Construyendo universo de tickers..."):
+            universo_raw = []
+            for idx_key in indices_sel:
+                fn = INDICES[idx_key][1]
+                tks = fn()
+                universo_raw.extend(tks)
+
+            universo_raw = list(dict.fromkeys(universo_raw))  # deduplicar
+
+            if excluir_conocidos:
+                universo = [t for t in universo_raw if t not in EXCLUIR_MEGACAPS]
+            else:
+                universo = universo_raw
+
+            # Limitar al máximo seleccionado
+            universo = universo[:n_activos]
+
+        st.info(f"🌐 Universo: **{len(universo_raw)} tickers** en índices seleccionados "
+                f"→ **{len(universo)} a analizar** "
+                f"({'excl. megacaps' if excluir_conocidos else 'incl. megacaps'})")
+
+        # 2. SPY como referencia
+        spy_chg_d = None
+        try:
+            spy_h, _ = descargar("^GSPC", "5d")
+            if not spy_h.empty and len(spy_h) >= 2:
+                spy_chg_d = round((spy_h["Close"].iloc[-1] / spy_h["Close"].iloc[-2] - 1) * 100, 2)
+        except Exception:
+            pass
+
+        spy_col = "green" if (spy_chg_d or 0) >= 0 else "red"
+        st.markdown(f"**S&P 500 hoy:** :{spy_col}[{spy_chg_d:+.2f}%]" if spy_chg_d else "**S&P 500:** N/A")
+
+        # 3. Descarga bulk
+        st.markdown("### ⏳ Descargando datos...")
+        prog_bar = st.progress(0, text="Iniciando descarga bulk...")
+
+        resultados_d = []
+        n_ok_d = 0
+        n_err_d = 0
+
+        # Bulk download en lotes de 100 para eficiencia
+        LOTE = 100
+        n_lotes = (len(universo) + LOTE - 1) // LOTE
+
+        all_closes  = {}
+        all_volumes = {}
+        all_opens   = {}
+
+        for i_lote in range(n_lotes):
+            batch = universo[i_lote * LOTE : (i_lote + 1) * LOTE]
+            prog_bar.progress(
+                int((i_lote / n_lotes) * 60),
+                text=f"Descargando lote {i_lote+1}/{n_lotes} ({len(batch)} tickers)..."
+            )
+            try:
+                raw = yf.download(
+                    batch, period="6mo",
+                    auto_adjust=True, progress=False,
+                    group_by="ticker"
+                )
+                if raw.empty:
+                    n_err_d += len(batch)
+                    continue
+
+                for t in batch:
+                    try:
+                        if isinstance(raw.columns, pd.MultiIndex):
+                            if t in raw.columns.get_level_values(0):
+                                all_closes[t]  = raw[t]["Close"].dropna()
+                                all_volumes[t] = raw[t]["Volume"].dropna()
+                                all_opens[t]   = raw[t]["Open"].dropna()
+                        else:
+                            if len(batch) == 1:
+                                all_closes[t]  = raw["Close"].dropna()
+                                all_volumes[t] = raw["Volume"].dropna()
+                                all_opens[t]   = raw["Open"].dropna()
+                    except Exception:
+                        n_err_d += 1
+            except Exception:
+                n_err_d += len(batch)
+            time.sleep(0.5)
+
+        prog_bar.progress(65, text="Detectando anomalías...")
+
+        # 4. Detectar anomalías
+        min_vol_abs = min_vol * 1_000
+
+        for i_t, ticker_d in enumerate(all_closes.keys()):
+            if i_t % 20 == 0:
+                pct = 65 + int((i_t / max(len(all_closes), 1)) * 30)
+                prog_bar.progress(pct, text=f"Analizando {ticker_d}... ({i_t}/{len(all_closes)})")
+
+            closes_s  = all_closes[ticker_d]
+            volumes_s = all_volumes.get(ticker_d, pd.Series(dtype=float))
+
+            if len(closes_s) < 30 or closes_s.iloc[-1] < min_precio:
+                continue
+            if volumes_s.empty or float(volumes_s.tail(20).mean()) < min_vol_abs:
+                continue
+
+            # Construir hist DataFrame
+            hist_d = pd.DataFrame({
+                "Close":  closes_s,
+                "Volume": volumes_s,
+                "Open":   all_opens.get(ticker_d, closes_s),
+                "High":   closes_s,  # simplificado para detección
+                "Low":    closes_s,
+            }).dropna()
+
+            r = detectar_anomalia(hist_d, {}, spy_chg_d, señales_sel)
+            if r:
+                resultados_d.append(r)
+                n_ok_d += 1
+
+        prog_bar.progress(100, text="¡Análisis completado!")
+        time.sleep(0.3)
+        prog_bar.empty()
+
+        # 5. Mostrar resultados
+        st.markdown(f"### 🏆 Resultados — {n_ok_d} anomalías detectadas en {len(all_closes)} tickers")
+
+        if not resultados_d:
+            st.warning("No se detectaron anomalías con los parámetros actuales. "
+                       "Prueba reduciendo los filtros o cambiando el índice.")
+        else:
+            # Ordenar por score
+            resultados_d.sort(key=lambda x: x["Score"], reverse=True)
+            top_res = resultados_d[:top_n]
+
+            # Métricas resumen
+            col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+            col_m1.metric("Tickers analizados", len(all_closes))
+            col_m2.metric("Anomalías detectadas", n_ok_d)
+            col_m3.metric("Top mostrados", len(top_res))
+            col_m4.metric("Score máx.", top_res[0]["Score"] if top_res else 0)
+
+            st.divider()
+
+            # Cards por ticker
+            SEÑAL_EMOJI = {
+                "VOL_EXTREMO":         "🔊",
+                "GAP_CONTINUATION":    "⚡",
+                "NEW_52W_HIGH":        "🏆",
+                "CONSOLIDATION_BREAK": "🚀",
+                "DIVERGENCIA":         "🌊",
+            }
+            SEÑAL_DESC = {
+                "VOL_EXTREMO":         "Volumen extremo — institucional posiblemente entrando",
+                "GAP_CONTINUATION":    "Brecha + continuación — reacción fuerte a noticia",
+                "NEW_52W_HIGH":        "Nuevo máximo 52 semanas con volumen",
+                "CONSOLIDATION_BREAK": "Ruptura tras consolidación larga",
+                "DIVERGENCIA":         "Diverge del mercado — catalizador idiosincrático",
+            }
+
+            for i, r in enumerate(top_res, 1):
+                primary  = r["Principal"]
+                emoji    = SEÑAL_EMOJI.get(primary, "📊")
+                cambio_c = "🟢" if r["Cambio %"] > 0 else "🔴"
+                ticker_r = r["Ticker"]
+
+                with st.expander(
+                    f"#{i} {emoji} **{ticker_r}** — {cambio_c} {r['Cambio %']:+.2f}%  "
+                    f"| Vol×{r['Vol×']}  | Score: {r['Score']}/100",
+                    expanded=(i <= 3)
+                ):
+                    col_a, col_b, col_c = st.columns(3)
+                    with col_a:
+                        st.metric("Precio", f"${r['Precio']}")
+                        st.metric("Cambio día", f"{r['Cambio %']:+.2f}%")
+                        if r["Alpha"] is not None:
+                            st.metric("Alpha vs SPY", f"{r['Alpha']:+.2f}%")
+                    with col_b:
+                        st.metric("Volumen relativo", f"{r['Vol×']}×")
+                        st.metric("RSI", r["RSI"] or "N/A")
+                        st.metric("Posición 52w", f"{r['Pos 52w %']}%")
+                    with col_c:
+                        st.metric("Mom 5 días", f"{r['Mom 5d %']:+.1f}%")
+                        st.metric("Mom 20 días", f"{r['Mom 20d %']:+.1f}%")
+                        if r["vs MA50 %"] is not None:
+                            st.metric("vs MA50", f"{r['vs MA50 %']:+.1f}%")
+
+                    st.markdown(f"**Señales detectadas:** {r['Señales']}")
+                    st.caption(f"💡 {SEÑAL_DESC.get(primary, '')}")
+
+                    # Links de investigación
+                    ticker_clean = ticker_r.split(".")[0]
+                    col_l1, col_l2, col_l3, col_l4 = st.columns(4)
+                    col_l1.link_button("📊 Finviz",
+                        f"https://finviz.com/quote.ashx?t={ticker_clean}",
+                        use_container_width=True)
+                    col_l2.link_button("📰 Noticias",
+                        f"https://finance.yahoo.com/quote/{ticker_r}/news",
+                        use_container_width=True)
+                    col_l3.link_button("📈 Fundamentales",
+                        f"https://stockanalysis.com/stocks/{ticker_clean.lower()}/",
+                        use_container_width=True)
+                    col_l4.link_button("🕯️ Chart",
+                        f"https://www.tradingview.com/chart/?symbol={ticker_r}",
+                        use_container_width=True)
+
+            st.divider()
+
+            # Tabla resumen
+            st.markdown("### 📋 Tabla resumen")
+            df_res = pd.DataFrame([{
+                "Ticker":    r["Ticker"],
+                "Precio":    r["Precio"],
+                "Cambio %":  r["Cambio %"],
+                "Alpha %":   r["Alpha"],
+                "Vol×":      r["Vol×"],
+                "RSI":       r["RSI"],
+                "Pos 52w %": r["Pos 52w %"],
+                "Mom 5d %":  r["Mom 5d %"],
+                "Score":     r["Score"],
+                "Señales":   r["Señales"],
+            } for r in top_res])
+
+            def color_cambio(val):
+                if pd.isna(val): return ""
+                return "color: #50fa7b" if val > 0 else "color: #ff5555"
+
+            def color_score(val):
+                if pd.isna(val): return ""
+                if val >= 80: return "color: #50fa7b; font-weight: bold"
+                if val >= 60: return "color: #f1fa8c"
+                return ""
+
+            st.dataframe(
+                df_res.style
+                    .applymap(color_cambio, subset=["Cambio %","Alpha %","Mom 5d %"])
+                    .applymap(color_score,  subset=["Score"]),
+                use_container_width=True,
+                hide_index=True
+            )
+
+            st.caption(
+                f"📡 Datos: yfinance | "
+                f"Universo: {', '.join([INDICES[k][0] for k in indices_sel])} | "
+                f"Señales: {', '.join(señales_sel)} | "
+                f"Filtros: precio>${min_precio}, vol>{min_vol}k | "
+                f"Actualizado: {datetime.now().strftime('%H:%M UTC')}"
+            )
 
 # ╔═══════════════════════════════════════════════════════════════╗
 # ║  ANÁLISIS INDIVIDUAL                                          ║
@@ -2059,215 +2372,6 @@ elif pagina == "📊 Macro":
             """)
         else:
             st.warning("No se pudieron cargar los ETFs de renta fija. Reintenta en unos momentos.")
-
-
-# ╔═══════════════════════════════════════════════════════════════╗
-# ║  PREDICCIÓN IA                                                ║
-# ╚═══════════════════════════════════════════════════════════════╝
-elif pagina == "🔮 Predicción IA":
-    st.header("🔮 Predicción IA — Señal Direccional")
-    st.markdown(
-        "Introduce **cualquier ticker** para obtener una señal de dirección "
-        "del precio para el **día siguiente**, generada por redes neuronales "
-        "entrenadas sobre datos 2010–2018."
-    )
-
-    if not TORCH_OK:
-        st.error("PyTorch no está instalado. Añade `torch` a `requirements.txt` y redespliega.")
-        st.stop()
-
-    registry = cargar_registry()
-    if registry is None:
-        st.error("No se encontró `model_registry.json` en el repositorio.")
-        st.info(
-            "**Pasos para activar este módulo:**\n"
-            "1. Ejecuta el Bloque 12 en tu notebook de Colab\n"
-            "2. Descarga `models_export.zip`\n"
-            "3. Sube los archivos `.pt` y `model_registry.json` a la **raíz** del repo GitHub\n"
-            "4. Commit → el módulo se activa automáticamente"
-        )
-        st.stop()
-
-    # ── Sidebar ──────────────────────────────────────────────────
-    with st.sidebar:
-        ticker_pred      = st.text_input("Ticker (cualquiera)", value="AAPL").upper().strip()
-        mostrar_features = st.checkbox("Ver features de entrada", value=False)
-        st.divider()
-        run_pred = st.button("🔮 Predecir", type="primary", use_container_width=True)
-
-    # ── Selección automática de modelo ───────────────────────────
-    modelo_ticker, razon_modelo = seleccionar_modelo(ticker_pred, registry)
-    meta_modelo = registry.get(modelo_ticker, {})
-
-    # Cabecera informativa
-    st.info(f"🧠 {razon_modelo}")
-
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Ticker analizado",  ticker_pred)
-    col2.metric("Modelo aplicado",   f"{modelo_ticker} ({meta_modelo.get('model_name','—')})")
-    col3.metric("Dir. Accuracy test",f"{meta_modelo.get('test_dir_accuracy',0)*100:.1f}%")
-    col4.metric("Sharpe test",       f"{meta_modelo.get('test_sharpe',0):+.3f}")
-    st.caption(
-        f"📊 Entrenado: {meta_modelo.get('train_period','—')} | "
-        f"Evaluado: {meta_modelo.get('test_period','—')} | "
-        f"Ventana: {meta_modelo.get('win_seq',30)} días | "
-        f"Features: {meta_modelo.get('n_features',10)}"
-    )
-
-    if run_pred and ticker_pred:
-        # Cargar modelo
-        with st.spinner(f"Cargando modelo {meta_modelo.get('model_name','—')} ({modelo_ticker})..."):
-            model, meta_o = cargar_modelo_cached(modelo_ticker, json.dumps(registry))
-
-        if model is None:
-            st.error(f"No se pudo cargar el modelo: {meta_o}")
-            st.stop()
-
-        # Construir features del ticker introducido
-        with st.spinner(f"Descargando datos de {ticker_pred} y calculando features..."):
-            features_df, err = build_features_app(ticker_pred)
-
-        if features_df is None:
-            st.error(f"Error construyendo features para {ticker_pred}: {err}")
-            st.stop()
-
-        # Inferencia
-        resultado = predecir_senal(model, meta_o, features_df)
-
-        # ── Resultado principal ───────────────────────────────────
-        st.divider()
-        st.subheader(f"📡 Señal para **{ticker_pred}** — próximo día hábil")
-
-        prob_alc = resultado["prob_alcista"]
-        conf     = resultado["confianza"]
-        signal   = resultado["signal"]
-
-        if   prob_alc > 0.65: color, emoji = "#50fa7b", "🟢"
-        elif prob_alc > 0.5:  color, emoji = "#8be9fd", "🔵"
-        elif prob_alc > 0.35: color, emoji = "#ffb86c", "🟡"
-        else:                  color, emoji = "#ff5555", "🔴"
-
-        st.markdown(
-            f"<div style='text-align:center; padding:24px; background:#1e1e2e; "
-            f"border-radius:12px; border:2px solid {color};'>"
-            f"<h1 style='color:{color}; margin:0'>{emoji} {signal}</h1>"
-            f"<p style='color:#ccc; margin:10px 0 0 0; font-size:1.1em'>"
-            f"Probabilidad alcista: <b style='color:{color}'>{prob_alc*100:.1f}%</b>"
-            f"</p></div>",
-            unsafe_allow_html=True
-        )
-        st.markdown("")
-
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Prob. Alcista", f"{prob_alc*100:.1f}%")
-        m2.metric("Prob. Bajista", f"{resultado['prob_bajista']*100:.1f}%")
-        m3.metric("Confianza",     f"{conf*100:.1f}%",
-                   help="0% = máxima incertidumbre (50/50) · 100% = señal muy definida")
-
-        # Gauge
-        fig_g = go.Figure(go.Indicator(
-            mode="gauge+number",
-            value=prob_alc * 100,
-            title={"text": "Probabilidad Alcista (%)"},
-            gauge={
-                "axis":        {"range": [0, 100]},
-                "bar":         {"color": color},
-                "bgcolor":     "#1e1e2e",
-                "bordercolor": "#44475a",
-                "steps": [
-                    {"range": [0,  35],  "color": "rgba(255,85,85,0.25)"},
-                    {"range": [35, 50],  "color": "rgba(255,184,108,0.15)"},
-                    {"range": [50, 65],  "color": "rgba(139,233,253,0.15)"},
-                    {"range": [65, 100], "color": "rgba(80,250,123,0.25)"},
-                ],
-                "threshold": {"line": {"color": "#f8f8f2", "width": 3},
-                              "thickness": 0.8, "value": 50}
-            },
-            number={"suffix": "%", "font": {"size": 34}},
-        ))
-        fig_g.update_layout(template="plotly_dark", paper_bgcolor="#12121f",
-                            height=300, margin=dict(t=40, b=10, l=20, r=20))
-        st.plotly_chart(fig_g, use_container_width=True)
-
-        # Features opcionales
-        if mostrar_features:
-            st.subheader("🔬 Últimos 10 días de features (entrada al modelo)")
-            WIN   = meta_o.get("win_seq", 30)
-            mean  = np.array(meta_o["scaler_mean"])
-            scale = np.array(meta_o["scaler_scale"])
-            FCOLS = meta_o["feature_cols"]
-            X_norm = (features_df[FCOLS].values[-WIN:] - mean) / scale
-            df_feat = pd.DataFrame(X_norm[-10:], columns=FCOLS)
-            df_feat.index = features_df.index[-10:].strftime("%d/%m/%y")
-            st.dataframe(df_feat.style.background_gradient(cmap="RdYlGn", axis=None),
-                         use_container_width=True)
-            st.caption("Valores normalizados con StandardScaler entrenado en datos 2010-2018")
-
-        # Disclaimer
-        st.divider()
-        with st.expander("ℹ️ Metodología y limitaciones"):
-            st.markdown(f"""
-**¿Cómo funciona?**
-El modelo recibe los últimos **30 días** de 10 features normalizadas
-(log-retorno, ratios MA, RSI, volatilidad, momentum, VIX, spread 10Y-2Y)
-y predice la probabilidad de que el retorno del día siguiente sea positivo.
-
-**¿Por qué se usa el modelo de {modelo_ticker} para {ticker_pred}?**
-Las features son todas ratios y métricas normalizadas — son independientes
-de la escala y el precio absoluto del activo. El modelo aprende patrones
-de comportamiento técnico que generalizan entre activos con perfil similar.
-
-**Métricas del modelo {modelo_ticker} en test (2021–2023):**
-- Directional Accuracy: **{meta_modelo.get('test_dir_accuracy',0)*100:.1f}%**
-- Sharpe estrategia: **{meta_modelo.get('test_sharpe',0):+.3f}**
-- Max Drawdown: **{meta_modelo.get('test_max_dd',0)*100:.1f}%**
-
-**⚠️ Limitaciones:**
-- El modelo fue entrenado hasta 2018 — el mercado ha evolucionado
-- Una DA del 55-60% es estadísticamente significativa en finanzas pero
-  no garantiza rentabilidad real (comisiones, slippage, gestión de riesgo)
-- Esta señal es un **input más** del análisis, no una recomendación de inversión
-            """)
-
-        st.caption(
-            f"📡 Datos: Finnhub / Yahoo Finance | "
-            f"Modelo: {meta_modelo.get('model_name','—')} entrenado en Colab (PyTorch) | "
-            f"Aplicado a: {ticker_pred} via proxy {modelo_ticker}"
-        )
-
-    else:
-        # Estado inicial — tabla de modelos disponibles
-        st.info("👈 Introduce cualquier ticker y pulsa **Predecir**.")
-
-        st.subheader("📋 Modelos entrenados disponibles")
-        rows = []
-        for tk, meta in registry.items():
-            rows.append({
-                "Ticker entrenado": tk,
-                "Arquitectura":     meta.get("model_name","—"),
-                "Dir. Accuracy":    f"{meta.get('test_dir_accuracy',0)*100:.1f}%",
-                "Sharpe test":      f"{meta.get('test_sharpe',0):+.3f}",
-                "Max DD test":      f"{meta.get('test_max_dd',0)*100:.1f}%",
-                "Se usa para":      "Cualquier ticker por defecto" if tk == "SPY"
-                                    else f"Activos tipo {tk}",
-            })
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-
-        st.subheader("🗺️ Mapeo automático de tickers")
-        st.markdown("""
-        | Tipo de activo | Modelo aplicado | Ejemplos |
-        |---|---|---|
-        | Acciones tech / Nasdaq | **QQQ** | AAPL, MSFT, NVDA, TSLA, GOOGL |
-        | Oro / metales preciosos | **GLD** | IAU, SLV, NEM, GOLD |
-        | Bonos / renta fija | **IEF** | TLT, SHY, BND, LQD, HYG |
-        | Materias primas | **DBC** | USO, UNG, PDBC |
-        | Acciones generales / otros | **SPY** | Cualquier otro ticker |
-        | Acciones europeas (.MC, .DE...) | **SPY** | SAN.MC, SAP.DE, MAIRE.MI |
-        """)
-        st.caption(
-            "Modelos entrenados en Redes Neuronales y Aplicaciones Financieras — VIU | "
-            "Features: 10 indicadores técnicos normalizados | Ventana: 30 días"
-        )
 
 
 # ╔═══════════════════════════════════════════════════════════════╗
