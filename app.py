@@ -1232,211 +1232,347 @@ with st.sidebar:
 # ╚═══════════════════════════════════════════════════════════════╝
 if pagina == "🌅 Outlook":
     st.header("🌅 Resumen Ejecutivo del Mercado")
-    st.markdown("Vista de 30 segundos del estado del mercado y tu cartera personal.")
+    st.markdown("Vista de 30 segundos: estado del mercado, tu watchlist, anomalías recientes y eventos macro de la semana.")
 
     refresh_outlook = st.button("🔄 Actualizar", type="primary")
 
-    # ── 1. Estado del mercado global ─────────────────────────────
-    st.markdown("### 📊 Mercado global")
+    # ═══════════════════════════════════════════════════════════════
+    # 1. ESTADO DEL MERCADO — métricas clave en una fila
+    # ═══════════════════════════════════════════════════════════════
+    st.markdown("### 📊 Estado del mercado")
 
-    market_indices = {
-        "S&P 500":       "^GSPC",
-        "Nasdaq":        "^IXIC",
-        "Dow Jones":     "^DJI",
-        "Russell 2000":  "^RUT",
-        "VIX":           "^VIX",
-        "DAX":           "^GDAXI",
-        "FTSE 100":      "^FTSE",
-        "Nikkei":        "^N225",
+    market_metrics = {
+        "S&P 500":      ("^GSPC",  "📈"),
+        "VIX":          ("^VIX",   "⚡"),
+        "Dólar (DXY)":  ("DX-Y.NYB","💵"),
+        "10Y Treasury": ("^TNX",   "🏦"),
+        "Oro":          ("GC=F",   "🥇"),
+        "Bitcoin":      ("BTC-USD","₿"),
     }
 
-    with st.spinner("Cargando estado del mercado..."):
-        market_data = []
-        try:
-            symbols   = list(market_indices.values())
-            data_mkt  = yf.download(symbols, period="5d",
-                                     auto_adjust=True, progress=False)
-
-            for nombre, sym in market_indices.items():
-                try:
-                    if isinstance(data_mkt.columns, pd.MultiIndex):
-                        c = data_mkt["Close"][sym].dropna()
-                    else:
-                        c = data_mkt["Close"].dropna()
-
-                    if len(c) >= 2:
-                        precio = float(c.iloc[-1])
-                        chg    = (precio / float(c.iloc[-2]) - 1) * 100
-                        market_data.append({
-                            "Índice": nombre,
-                            "Valor":  round(precio, 2),
-                            "Cambio %": round(chg, 2)
-                        })
-                except Exception:
-                    continue
-        except Exception as e:
-            st.error(f"Error descargando índices: {e}")
+    with st.spinner("Descargando datos del mercado..."):
+        market_data = {}
+        for nombre, (ticker, emoji) in market_metrics.items():
+            try:
+                h, _ = descargar(ticker, "5d")
+                if not h.empty and len(h) >= 2:
+                    precio = float(h["Close"].iloc[-1])
+                    ayer   = float(h["Close"].iloc[-2])
+                    chg    = (precio / ayer - 1) * 100
+                    market_data[nombre] = {
+                        "precio": precio,
+                        "cambio": chg,
+                        "emoji":  emoji
+                    }
+            except Exception:
+                continue
 
     if market_data:
-        # Mostrar como tarjetas
-        cols = st.columns(4)
-        for i, m_d in enumerate(market_data):
-            chg = m_d["Cambio %"]
-            col = cols[i % 4]
-            with col:
-                arrow = "▲" if chg >= 0 else "▼"
-                color = "#27ae60" if chg >= 0 else "#e74c3c"
+        cols_market = st.columns(len(market_data))
+        for i, (nombre, datos) in enumerate(market_data.items()):
+            with cols_market[i]:
+                color = "#50fa7b" if datos["cambio"] >= 0 else "#ff5555"
                 st.markdown(f"""
-                <div style="background:#1e1e2e;padding:12px;border-radius:6px;
-                            border-left:3px solid {color};margin-bottom:8px">
-                  <div style="font-size:12px;color:#888">{m_d['Índice']}</div>
-                  <div style="font-size:18px;font-weight:bold;color:#f8f8f2">{m_d['Valor']:,}</div>
-                  <div style="font-size:13px;color:{color};font-weight:bold">
-                    {arrow} {chg:+.2f}%
-                  </div>
-                </div>""", unsafe_allow_html=True)
+                <div style="background:#1e1e2e;padding:14px;border-radius:8px;text-align:center;border-left:3px solid {color}">
+                  <div style="font-size:22px">{datos['emoji']}</div>
+                  <div style="font-size:12px;color:#888;margin-top:4px">{nombre}</div>
+                  <div style="font-size:18px;font-weight:bold;color:#f8f8f2;margin-top:4px">{datos['precio']:.2f}</div>
+                  <div style="font-size:13px;color:{color};margin-top:2px">{datos['cambio']:+.2f}%</div>
+                </div>
+                """, unsafe_allow_html=True)
 
-        # Calcular régimen general
-        spy_chg_o = next((m["Cambio %"] for m in market_data if m["Índice"] == "S&P 500"), None)
-        vix_val   = next((m["Valor"] for m in market_data if m["Índice"] == "VIX"), None)
+    # ── Sectores líderes/débiles del día (ETFs sectoriales) ─────────
+    st.markdown("#### 🏭 Sectores hoy")
 
-        if spy_chg_o is not None and vix_val is not None:
-            if   spy_chg_o > 1.0 and vix_val < 18:  regimen_o, color_r = "Risk-ON fuerte", "#27ae60"
-            elif spy_chg_o > 0.2:                   regimen_o, color_r = "Risk-ON",        "#2ecc71"
-            elif spy_chg_o > -0.2:                  regimen_o, color_r = "Neutro",         "#f39c12"
-            elif spy_chg_o > -1.0:                  regimen_o, color_r = "Risk-OFF",       "#e74c3c"
-            else:                                   regimen_o, color_r = "Risk-OFF fuerte","#c0392b"
+    sector_etfs = {
+        "Tecnología":     "XLK",
+        "Financiero":     "XLF",
+        "Salud":          "XLV",
+        "Energía":        "XLE",
+        "Consumo Disc.":  "XLY",
+        "Consumo Bás.":   "XLP",
+        "Industrial":     "XLI",
+        "Utilities":      "XLU",
+        "Materiales":     "XLB",
+        "Inmobiliario":   "XLRE",
+        "Comunicación":   "XLC",
+    }
 
-            st.markdown(f"""
-            <div style="background:#1e1e2e;padding:14px;border-radius:6px;
-                        border-left:4px solid {color_r};margin-top:8px">
-              <span style="color:#888;font-size:13px">Régimen actual:</span>
-              <span style="color:{color_r};font-size:16px;font-weight:bold;margin-left:8px">
-                {regimen_o}
-              </span>
-              <span style="color:#888;font-size:12px;margin-left:12px">
-                (S&P {spy_chg_o:+.2f}% | VIX {vix_val})
-              </span>
-            </div>""", unsafe_allow_html=True)
+    sector_changes = []
+    with st.spinner("Analizando sectores..."):
+        for nombre, ticker in sector_etfs.items():
+            try:
+                h, _ = descargar(ticker, "5d")
+                if not h.empty and len(h) >= 2:
+                    chg = (float(h["Close"].iloc[-1]) / float(h["Close"].iloc[-2]) - 1) * 100
+                    sector_changes.append({"Sector": nombre, "Cambio %": round(chg, 2)})
+            except Exception:
+                continue
+
+    if sector_changes:
+        df_sect = pd.DataFrame(sector_changes).sort_values("Cambio %", ascending=False)
+
+        col_sec1, col_sec2 = st.columns(2)
+        with col_sec1:
+            st.markdown("**🟢 Líderes**")
+            top3 = df_sect.head(3)
+            for _, row in top3.iterrows():
+                st.markdown(f"<div style='padding:6px;background:#1e3a1e;border-radius:4px;margin-bottom:4px'>"
+                            f"<b>{row['Sector']}</b> <span style='color:#50fa7b;float:right'>+{row['Cambio %']:.2f}%</span></div>",
+                            unsafe_allow_html=True)
+        with col_sec2:
+            st.markdown("**🔴 Más débiles**")
+            bot3 = df_sect.tail(3).iloc[::-1]
+            for _, row in bot3.iterrows():
+                st.markdown(f"<div style='padding:6px;background:#3a1e1e;border-radius:4px;margin-bottom:4px'>"
+                            f"<b>{row['Sector']}</b> <span style='color:#ff5555;float:right'>{row['Cambio %']:.2f}%</span></div>",
+                            unsafe_allow_html=True)
 
     st.divider()
 
-    # ── 2. Tu watchlist ─────────────────────────────────────────
+    # ═══════════════════════════════════════════════════════════════
+    # 2. TU WATCHLIST RESUMIDA
+    # ═══════════════════════════════════════════════════════════════
     st.markdown("### ⭐ Tu watchlist")
 
     df_wl_o = watchlist_load() if GSPREAD_AVAILABLE else pd.DataFrame()
     if df_wl_o.empty:
-        st.info("No tienes tickers en watchlist. Ve a ⭐ Watchlist para añadir alguno.")
+        st.info("📋 No tienes tickers en watchlist. Ve a **⭐ Watchlist** para añadir alguno.")
     else:
-        with st.spinner(f"Cargando {len(df_wl_o)} tickers de tu watchlist..."):
+        with st.spinner(f"Cargando {len(df_wl_o)} tickers..."):
             try:
                 tickers_wl = df_wl_o["ticker"].tolist()
+
                 if len(tickers_wl) == 1:
-                    h, _ = descargar(tickers_wl[0], "5d")
-                    wl_dat = h
-                    closes_dict = {tickers_wl[0]: h["Close"]} if not h.empty else {}
+                    h_t, _ = descargar(tickers_wl[0], "5d")
+                    closes_dict = {tickers_wl[0]: h_t["Close"]} if not h_t.empty else {}
                 else:
-                    wl_dat = yf.download(tickers_wl, period="5d",
-                                          auto_adjust=True, progress=False)
+                    bulk = yf.download(tickers_wl, period="5d",
+                                       auto_adjust=True, progress=False)
                     closes_dict = {}
-                    if isinstance(wl_dat.columns, pd.MultiIndex):
+                    if isinstance(bulk.columns, pd.MultiIndex):
                         for t in tickers_wl:
-                            if t in wl_dat.columns.get_level_values(1):
-                                closes_dict[t] = wl_dat["Close"][t].dropna()
+                            if t in bulk.columns.get_level_values(1):
+                                c = bulk["Close"][t].dropna()
+                                if not c.empty:
+                                    closes_dict[t] = c
 
                 wl_rows = []
                 for _, row_db in df_wl_o.iterrows():
                     t = row_db["ticker"]
                     if t not in closes_dict: continue
                     c = closes_dict[t]
-                    if len(c) >= 2:
-                        precio = float(c.iloc[-1])
-                        chg    = (precio / float(c.iloc[-2]) - 1) * 100
-                        # Retorno desde alta
-                        ret_alta = None
-                        try:
-                            p_inicial = float(row_db["precio_inicial"])
-                            if p_inicial > 0:
-                                ret_alta = (precio / p_inicial - 1) * 100
-                        except Exception:
-                            pass
-                        wl_rows.append({
-                            "Ticker":      t,
-                            "Precio":      round(precio, 2),
-                            "Cambio %":    round(chg, 2),
-                            "Desde alta %": round(ret_alta, 2) if ret_alta is not None else None,
-                            "Alta":        row_db["fecha_anadido"],
-                        })
+                    if len(c) < 2: continue
+                    precio = float(c.iloc[-1])
+                    chg    = (precio / float(c.iloc[-2]) - 1) * 100
+                    ret_alta = None
+                    try:
+                        p_inicial = float(row_db["precio_inicial"])
+                        if p_inicial > 0:
+                            ret_alta = (precio / p_inicial - 1) * 100
+                    except Exception:
+                        pass
+                    wl_rows.append({
+                        "Ticker":      t,
+                        "Precio":      round(precio, 2),
+                        "Hoy %":       round(chg, 2),
+                        "Desde alta %": round(ret_alta, 2) if ret_alta is not None else None,
+                        "Alta":        row_db["fecha_anadido"],
+                    })
 
                 if wl_rows:
-                    df_wlo = pd.DataFrame(wl_rows).sort_values("Cambio %", ascending=False)
+                    df_wlo = pd.DataFrame(wl_rows).sort_values("Hoy %", ascending=False)
 
                     col_w1, col_w2, col_w3 = st.columns(3)
-                    n_up   = int((df_wlo["Cambio %"] > 0).sum())
-                    n_down = int((df_wlo["Cambio %"] < 0).sum())
-                    avg_chg= float(df_wlo["Cambio %"].mean())
+                    n_up = int((df_wlo["Hoy %"] > 0).sum())
+                    col_w1.metric("Subiendo hoy", f"{n_up}/{len(df_wlo)}")
 
-                    col_w1.metric("Subiendo", f"{n_up}/{len(df_wlo)}")
-                    col_w2.metric("Bajando", f"{n_down}/{len(df_wlo)}")
+                    if "Desde alta %" in df_wlo.columns:
+                        winners = df_wlo["Desde alta %"].dropna()
+                        if len(winners) > 0:
+                            col_w2.metric("En verde", f"{int((winners>0).sum())}/{len(winners)}")
+
+                    avg_chg = float(df_wlo["Hoy %"].mean())
                     col_w3.metric("Cambio medio", f"{avg_chg:+.2f}%")
 
-                    def color_chg_o(v):
+                    def color_chg(v):
                         if pd.isna(v): return ""
                         return "color: #50fa7b" if v > 0 else "color: #ff5555"
 
                     st.dataframe(
-                        df_wlo.style.applymap(color_chg_o,
-                            subset=["Cambio %","Desde alta %"]),
+                        df_wlo.style.applymap(color_chg,
+                            subset=["Hoy %","Desde alta %"]),
                         use_container_width=True, hide_index=True
                     )
             except Exception as e:
-                st.error(f"Error con watchlist: {e}")
+                st.error(f"Error cargando watchlist: {e}")
 
     st.divider()
 
-    # ── 3. Acceso rápido a módulos ──────────────────────────────
-    st.markdown("### 🚀 Acciones rápidas")
-    col_a1, col_a2, col_a3, col_a4 = st.columns(4)
+    # ═══════════════════════════════════════════════════════════════
+    # 3. TOP 3 ANOMALÍAS RECIENTES (de la última ejecución de Descubrimiento)
+    # ═══════════════════════════════════════════════════════════════
+    st.markdown("### 🔎 Anomalías recientes")
 
-    with col_a1:
-        st.markdown("""
-        <div style="background:#1e1e2e;padding:14px;border-radius:6px;text-align:center">
-          <div style="font-size:24px">🔎</div>
-          <div style="font-weight:bold;color:#8be9fd">Descubrimiento</div>
-          <div style="font-size:11px;color:#888;margin-top:4px">
-            Encuentra anomalías inusuales
-          </div>
-        </div>""", unsafe_allow_html=True)
+    last_disc = st.session_state.get("descubrimiento_resultados", None)
+    if last_disc and len(last_disc) > 0:
+        st.caption(f"De tu última ejecución de Descubrimiento — {len(last_disc)} anomalías totales detectadas")
 
-    with col_a2:
-        st.markdown("""
-        <div style="background:#1e1e2e;padding:14px;border-radius:6px;text-align:center">
-          <div style="font-size:24px">🔍</div>
-          <div style="font-weight:bold;color:#8be9fd">Screener</div>
-          <div style="font-size:11px;color:#888;margin-top:4px">
-            Filtra activos por criterios
-          </div>
-        </div>""", unsafe_allow_html=True)
+        top3 = last_disc[:3]
+        for i, r in enumerate(top3, 1):
+            ticker_r  = r["Ticker"]
+            chg_color = "#50fa7b" if r["Cambio %"] > 0 else "#ff5555"
+            ticker_clean = ticker_r.split(".")[0]
 
-    with col_a3:
-        st.markdown("""
-        <div style="background:#1e1e2e;padding:14px;border-radius:6px;text-align:center">
-          <div style="font-size:24px">📈</div>
-          <div style="font-weight:bold;color:#8be9fd">Análisis</div>
-          <div style="font-size:11px;color:#888;margin-top:4px">
-            Profundiza en un ticker
-          </div>
-        </div>""", unsafe_allow_html=True)
+            st.markdown(f"""
+            <div style="background:#1e1e2e;border-left:3px solid #8be9fd;padding:12px;margin-bottom:8px;border-radius:4px">
+              <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap">
+                <div>
+                  <span style="font-size:16px;font-weight:bold;color:#f8f8f2">#{i} {ticker_r}</span>
+                  <span style="color:{chg_color};font-weight:bold;margin-left:10px">{r['Cambio %']:+.2f}%</span>
+                  <span style="color:#888;font-size:12px;margin-left:8px">${r['Precio']}</span>
+                </div>
+                <div style="background:#44475a;padding:3px 8px;border-radius:10px;font-size:12px;color:#8be9fd">
+                  Score: {r['Score']}/100
+                </div>
+              </div>
+              <div style="margin-top:6px;font-size:12px;color:#bbb">
+                <b>Señales:</b> {r['Señales']} &nbsp;|&nbsp; Vol×{r['Vol×']}
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
 
-    with col_a4:
-        st.markdown("""
-        <div style="background:#1e1e2e;padding:14px;border-radius:6px;text-align:center">
-          <div style="font-size:24px">💼</div>
-          <div style="font-weight:bold;color:#8be9fd">Cartera</div>
-          <div style="font-size:11px;color:#888;margin-top:4px">
-            Analiza tu portfolio
-          </div>
-        </div>""", unsafe_allow_html=True)
+        st.caption("💡 Para ver las anomalías completas → ve a **🔎 Descubrimiento**")
+    else:
+        st.info("📋 No has ejecutado **🔎 Descubrimiento** en esta sesión. Ve allí para detectar anomalías del día.")
+
+    st.divider()
+
+    # ═══════════════════════════════════════════════════════════════
+    # 4. CALENDARIO MACRO DE LA SEMANA
+    # ═══════════════════════════════════════════════════════════════
+    st.markdown("### 📅 Calendario macro de la semana")
+
+    today        = datetime.now()
+    weekday      = today.weekday()  # 0=lunes, 6=domingo
+    monday       = today - timedelta(days=weekday)
+    nombre_dias  = ["Lunes","Martes","Miércoles","Jueves","Viernes"]
+    week_dates   = [monday + timedelta(days=d) for d in range(5)]
+
+    # Eventos macro hardcoded — ocurrencias mensuales/trimestrales típicas
+    eventos_macro = []
+    for fecha in week_dates:
+        dia_mes  = fecha.day
+        dia_sem  = fecha.weekday()  # 0=lunes ... 4=viernes
+
+        # Primer viernes del mes — Non-Farm Payrolls (US)
+        if dia_sem == 4 and dia_mes <= 7:
+            eventos_macro.append({
+                "fecha":    fecha,
+                "evento":   "📊 Non-Farm Payrolls (US)",
+                "hora":     "14:30 UTC",
+                "impacto":  "🔴 Alto",
+                "desc":     "Datos de empleo no agrícola — clave para la Fed"
+            })
+
+        # Día 10-15: CPI mensual (US, normalmente miércoles o jueves)
+        if 10 <= dia_mes <= 15 and dia_sem in [2, 3]:
+            eventos_macro.append({
+                "fecha":    fecha,
+                "evento":   "💰 CPI — Inflación (US)",
+                "hora":     "14:30 UTC",
+                "impacto":  "🔴 Alto",
+                "desc":     "Índice de Precios al Consumo — indicador de inflación"
+            })
+
+        # Día 15-20: PPI (Productor)
+        if 15 <= dia_mes <= 20 and dia_sem == 3:
+            eventos_macro.append({
+                "fecha":    fecha,
+                "evento":   "🏭 PPI — Inflación productor (US)",
+                "hora":     "14:30 UTC",
+                "impacto":  "🟡 Medio",
+                "desc":     "Precios al productor — anticipa CPI"
+            })
+
+        # Reuniones FOMC (~cada 6 semanas, miércoles)
+        # Aproximación: si miércoles y día_mes entre 20-25 alguna semana
+        if dia_sem == 2 and 20 <= dia_mes <= 25:
+            eventos_macro.append({
+                "fecha":    fecha,
+                "evento":   "🏦 Reunión FOMC (Fed)",
+                "hora":     "20:00 UTC",
+                "impacto":  "🔴 Alto",
+                "desc":     "Decisión de tipos de interés y press conference Powell"
+            })
+
+        # Jueves: Jobless Claims (semanal)
+        if dia_sem == 3:
+            eventos_macro.append({
+                "fecha":    fecha,
+                "evento":   "👥 Jobless Claims (US)",
+                "hora":     "14:30 UTC",
+                "impacto":  "🟢 Bajo",
+                "desc":     "Solicitudes semanales de subsidio por desempleo"
+            })
+
+        # ECB suele anunciar tipos jueves cada ~6 semanas (aproximación)
+        if dia_sem == 3 and 12 <= dia_mes <= 18:
+            eventos_macro.append({
+                "fecha":    fecha,
+                "evento":   "🇪🇺 BCE — Decisión de tipos",
+                "hora":     "14:15 UTC",
+                "impacto":  "🟡 Medio",
+                "desc":     "Banco Central Europeo — política monetaria EUR"
+            })
+
+        # GDP trimestral (último mes de cada trimestre, día 25-30)
+        if today.month in [3, 6, 9, 12] and 25 <= dia_mes <= 30 and dia_sem == 3:
+            eventos_macro.append({
+                "fecha":    fecha,
+                "evento":   "📈 GDP trimestral (US)",
+                "hora":     "14:30 UTC",
+                "impacto":  "🔴 Alto",
+                "desc":     "Producto Interior Bruto — crecimiento de la economía"
+            })
+
+    # Mostrar eventos por día
+    if eventos_macro:
+        eventos_macro.sort(key=lambda x: x["fecha"])
+
+        for fecha_dia in week_dates:
+            eventos_dia = [e for e in eventos_macro if e["fecha"].date() == fecha_dia.date()]
+            if eventos_dia:
+                dia_label = nombre_dias[fecha_dia.weekday()]
+                fecha_str = fecha_dia.strftime("%d-%m")
+                es_hoy    = fecha_dia.date() == today.date()
+                color_bg  = "#1a3a1a" if es_hoy else "#1e1e2e"
+                marcador  = " 👈 HOY" if es_hoy else ""
+
+                st.markdown(f"**{dia_label} {fecha_str}**{marcador}")
+                for ev in eventos_dia:
+                    st.markdown(f"""
+                    <div style="background:{color_bg};padding:10px;margin-bottom:6px;border-radius:6px;border-left:3px solid #8be9fd">
+                      <div style="display:flex;justify-content:space-between;flex-wrap:wrap">
+                        <div>
+                          <b style="color:#f8f8f2">{ev['evento']}</b>
+                          <span style="color:#888;font-size:12px;margin-left:6px">{ev['hora']}</span>
+                        </div>
+                        <span style="font-size:12px">{ev['impacto']}</span>
+                      </div>
+                      <div style="font-size:11px;color:#aaa;margin-top:4px">{ev['desc']}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+    else:
+        st.info("📭 No hay eventos macro destacables esta semana — semana relativamente tranquila.")
+
+    st.caption(
+        "ℹ️ Eventos calculados según patrones típicos. Verifica fechas exactas en "
+        "[Trading Economics](https://tradingeconomics.com/calendar) o "
+        "[Investing.com](https://www.investing.com/economic-calendar/)"
+    )
+
+    st.divider()
 
     st.caption(f"🕐 Última actualización: {datetime.now().strftime('%H:%M %d-%m-%Y')}")
 
@@ -1894,6 +2030,10 @@ elif pagina == "🔎 Descubrimiento":
             # Ordenar por score
             resultados_d.sort(key=lambda x: x["Score"], reverse=True)
             top_res = resultados_d[:top_n]
+
+            # Guardar para que Outlook pueda mostrarlos
+            st.session_state["descubrimiento_resultados"] = resultados_d
+            st.session_state["descubrimiento_fecha"]      = datetime.now()
 
             # Métricas resumen
             col_m1, col_m2, col_m3, col_m4 = st.columns(4)
