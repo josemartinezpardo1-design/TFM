@@ -808,13 +808,73 @@ WATCHLIST_SHEET_ID = "1Yj2KkMypva14ZzpbnP9hDMexhzDGljWU6yhtnsVN980"
 WATCHLIST_TAB      = "watchlist"
 WATCHLIST_COLS     = ["fecha_anadido", "ticker", "precio_inicial", "nota"]
 
+
+def _get_precio_actual(ticker):
+    """Obtiene precio actual de un ticker probando varias fuentes."""
+    ticker = ticker.strip().upper()
+
+    # 1. Intentar yfinance directamente con period 5d
+    try:
+        import yfinance as yf
+        t = yf.Ticker(ticker)
+        h = t.history(period="5d")
+        if not h.empty and "Close" in h.columns:
+            precio = float(h["Close"].iloc[-1])
+            if precio > 0:
+                return precio, None
+    except Exception as e:
+        e1 = str(e)
+    else:
+        e1 = "vacío"
+
+    # 2. Fallback: yfinance.download
+    try:
+        import yfinance as yf
+        h = yf.download(ticker, period="5d", progress=False, auto_adjust=True)
+        if not h.empty and "Close" in h.columns:
+            precio = float(h["Close"].iloc[-1])
+            if precio > 0:
+                return precio, None
+    except Exception as e:
+        e2 = str(e)
+    else:
+        e2 = "vacío"
+
+    # 3. Fallback: Finnhub si disponible
+    try:
+        if fh_client is not None:
+            quote = fh_client.quote(ticker)
+            if quote and quote.get("c", 0) > 0:
+                return float(quote["c"]), None
+    except Exception as e:
+        e3 = str(e)
+    else:
+        e3 = "no disponible"
+
+    return None, f"yf.Ticker:{e1[:30]} | yf.download:{e2[:30]} | finnhub:{e3[:30]}"
+
+
+def _get_watchlist_error():
+    """Devuelve string descriptivo del error de Sheets, o None si todo OK."""
+    if not GSPREAD_AVAILABLE:
+        return "Librería gspread no instalada. Añade `gspread` y `google-auth` a requirements.txt"
+    try:
+        if "gcp_service_account" not in st.secrets:
+            return "Falta secret `[gcp_service_account]` en Streamlit. Settings → Secrets."
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        if not creds_dict.get("client_email"):
+            return "Secret `gcp_service_account` mal configurado (falta client_email)."
+        return None
+    except Exception as e:
+        return f"Error leyendo secrets: {e}"
+
 @st.cache_resource
 def get_watchlist_ws():
     """Conecta a Google Sheets y retorna el worksheet de watchlist (lo crea si no existe)."""
-    if not GSPREAD_AVAILABLE:
+    err = _get_watchlist_error()
+    if err:
         return None
     try:
-        # Las credenciales vienen de Streamlit secrets
         creds_dict = dict(st.secrets["gcp_service_account"])
         creds = Credentials.from_service_account_info(
             creds_dict,
@@ -829,6 +889,8 @@ def get_watchlist_ws():
             ws.append_row(WATCHLIST_COLS)
         return ws
     except Exception as e:
+        # Guardar error en session_state para diagnóstico
+        st.session_state["_watchlist_last_error"] = str(e)
         return None
 
 def watchlist_load():
@@ -1574,6 +1636,88 @@ if pagina == "🌅 Outlook":
 
     st.divider()
 
+    # ═══════════════════════════════════════════════════════════════
+    # 5. NOTICIAS — De tu watchlist o generales si está vacía
+    # ═══════════════════════════════════════════════════════════════
+    st.markdown("### 📰 Noticias relevantes")
+
+    if fh_client is None:
+        st.info("📭 Finnhub no configurado — sin noticias disponibles. Configura FINNHUB_KEY en secrets.")
+    else:
+        # Determinar de qué tickers traer noticias
+        df_wl_news = watchlist_load() if GSPREAD_AVAILABLE else pd.DataFrame()
+
+        if not df_wl_news.empty:
+            # Noticias de la watchlist
+            tickers_news = df_wl_news["ticker"].tolist()[:5]  # max 5 tickers
+            st.caption(f"De tus {len(tickers_news)} tickers en watchlist")
+        else:
+            # Noticias generales del mercado: SPY + AAPL + NVDA como proxy
+            tickers_news = ["SPY", "AAPL", "NVDA"]
+            st.caption("Noticias generales del mercado (añade tickers a tu watchlist para personalizar)")
+
+        with st.spinner("Cargando noticias..."):
+            today_str    = datetime.now().strftime("%Y-%m-%d")
+            week_ago_str = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+
+            todas_noticias = []
+            for t in tickers_news:
+                try:
+                    # Solo tickers US que Finnhub soporta (sin sufijos extranjeros)
+                    if "." in t:
+                        continue
+                    news_items = fh_client.company_news(t, _from=week_ago_str, to=today_str)
+                    if news_items:
+                        for n in news_items[:3]:  # top 3 por ticker
+                            todas_noticias.append({
+                                "ticker":   t,
+                                "fecha":    n.get("datetime", 0),
+                                "fuente":   n.get("source", ""),
+                                "titular":  n.get("headline", ""),
+                                "url":      n.get("url", ""),
+                                "resumen":  n.get("summary", "")[:200],
+                                "imagen":   n.get("image", ""),
+                            })
+                except Exception:
+                    continue
+
+            # Ordenar por fecha (más reciente primero) y mostrar top 10
+            todas_noticias.sort(key=lambda x: x["fecha"], reverse=True)
+            todas_noticias = todas_noticias[:10]
+
+        if todas_noticias:
+            for n in todas_noticias:
+                fecha_n = datetime.fromtimestamp(n["fecha"]).strftime("%d-%m %H:%M") if n["fecha"] else ""
+                ticker_clean = n["ticker"].split(".")[0]
+
+                st.markdown(f"""
+                <div style="background:#1e1e2e;padding:12px;margin-bottom:8px;border-radius:6px;border-left:3px solid #ff79c6">
+                  <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px">
+                    <div>
+                      <span style="background:#44475a;padding:2px 8px;border-radius:10px;font-size:11px;color:#8be9fd">
+                        {n['ticker']}
+                      </span>
+                      <span style="color:#888;font-size:11px;margin-left:6px">
+                        {n['fuente']} · {fecha_n}
+                      </span>
+                    </div>
+                    <a href="{n['url']}" target="_blank" style="color:#8be9fd;font-size:12px;text-decoration:none">
+                      Leer →
+                    </a>
+                  </div>
+                  <div style="margin-top:6px;font-size:14px;color:#f8f8f2;font-weight:bold">
+                    {n['titular']}
+                  </div>
+                  <div style="margin-top:4px;font-size:12px;color:#aaa">
+                    {n['resumen']}{'...' if len(n['resumen']) >= 200 else ''}
+                  </div>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.info("📭 No se han encontrado noticias recientes para los tickers seleccionados.")
+
+    st.divider()
+
     st.caption(f"🕐 Última actualización: {datetime.now().strftime('%H:%M %d-%m-%Y')}")
 
 elif pagina == "🔍 Screener":
@@ -2110,12 +2254,17 @@ elif pagina == "🔎 Descubrimiento":
                     if st.button(f"⭐ Seguir {ticker_r}",
                                  key=f"wl_disc_{ticker_r}_{i}",
                                  use_container_width=True):
-                        signal_str = r["Señales"]
-                        notes = f"Detectado por agente — {signal_str} | Score: {r['Score']}/100"
-                        if watchlist_add(ticker_r, r["Precio"], notes):
-                            st.success(f"✅ {ticker_r} añadido a watchlist")
+                        err = _get_watchlist_error()
+                        if err:
+                            st.error(f"⚠️ {err}")
                         else:
-                            st.info(f"ℹ️ {ticker_r} ya estaba en watchlist")
+                            signal_str = r["Señales"]
+                            notes = f"Detectado por agente — {signal_str} | Score: {r['Score']}/100"
+                            if watchlist_add(ticker_r, r["Precio"], notes):
+                                st.success(f"✅ {ticker_r} añadido")
+                                st.balloons()
+                            else:
+                                st.info(f"ℹ️ {ticker_r} ya estaba")
 
             st.divider()
 
@@ -2204,12 +2353,88 @@ elif pagina == "⭐ Watchlist":
     st.header("⭐ Mi Watchlist")
     st.markdown("Tickers que estás siguiendo de cerca con tracking de su evolución desde que los añadiste.")
 
-    if not GSPREAD_AVAILABLE:
-        st.error("⚠️ La librería `gspread` no está instalada. Añade `gspread` y `google-auth` a `requirements.txt`")
+    # ═══════════════════════════════════════════════════════════════
+    # PANEL DE DIAGNÓSTICO (siempre visible)
+    # ═══════════════════════════════════════════════════════════════
+    with st.expander("🔧 Estado de la conexión", expanded=False):
+        col_d1, col_d2, col_d3 = st.columns(3)
+
+        # 1. Librerías
+        with col_d1:
+            if GSPREAD_AVAILABLE:
+                st.success("✅ Librerías OK")
+                st.caption("gspread + google-auth instaladas")
+            else:
+                st.error("❌ Librerías NO instaladas")
+                st.caption("Falta gspread/google-auth en requirements.txt")
+
+        # 2. Secret
+        with col_d2:
+            try:
+                if "gcp_service_account" in st.secrets:
+                    creds_d = dict(st.secrets["gcp_service_account"])
+                    if creds_d.get("client_email"):
+                        st.success("✅ Secret OK")
+                        email = creds_d["client_email"]
+                        st.caption(f"📧 {email[:30]}...")
+                    else:
+                        st.error("❌ Secret incompleto")
+                        st.caption("Falta client_email")
+                else:
+                    st.error("❌ Secret NO configurado")
+                    st.caption("Falta [gcp_service_account]")
+            except Exception as e:
+                st.error("❌ Error en secrets")
+                st.caption(str(e)[:50])
+
+        # 3. Conexión real al Sheet
+        with col_d3:
+            try:
+                ws = get_watchlist_ws()
+                if ws is not None:
+                    st.success("✅ Sheet conectado")
+                    st.caption(f"Pestaña: {WATCHLIST_TAB}")
+                else:
+                    st.error("❌ No conecta al Sheet")
+                    last_err = st.session_state.get("_watchlist_last_error", "Desconocido")
+                    st.caption(str(last_err)[:50])
+            except Exception as e:
+                st.error("❌ Error conexión")
+                st.caption(str(e)[:50])
+
+        st.caption(
+            "💡 **¿Algo en rojo?** Streamlit Cloud → ⋮ → Settings → "
+            "Secrets — añade `[gcp_service_account]` con las credenciales del "
+            "Service Account. Email del Service Account debe tener acceso al Google Sheet."
+        )
+
+    # Diagnóstico de conexión
+    err = _get_watchlist_error()
+    if err:
+        st.error(f"⚠️ **Watchlist no disponible:** {err}")
+        with st.expander("🔧 Cómo solucionarlo"):
+            st.markdown("""
+            **Si dice 'gspread no instalada':**
+            - Asegúrate de que `gspread` y `google-auth` están en `requirements.txt`
+            - Reinicia la app desde Streamlit Cloud → Manage app → Reboot
+
+            **Si dice 'Falta secret gcp_service_account':**
+            - Ve a Streamlit Cloud → Settings → Secrets
+            - Añade el bloque `[gcp_service_account]` con las credenciales del Service Account
+            - El email `tfm-agent@tfm-agent.iam.gserviceaccount.com` debe tener acceso al Sheet
+            """)
         st.stop()
 
     # ── Cargar watchlist desde Google Sheets ─────────────────────
     df_wl_db = watchlist_load()
+
+    # Mostrar error si hubo problema en la carga
+    last_err = st.session_state.get("_watchlist_last_error")
+    if last_err:
+        st.warning(f"⚠️ Hubo un error en la última operación: {last_err}")
+        if st.button("Limpiar error"):
+            st.session_state.pop("_watchlist_last_error", None)
+            st.rerun()
 
     with st.sidebar:
         st.markdown("### ➕ Añadir ticker")
@@ -2220,20 +2445,16 @@ elif pagina == "⭐ Watchlist":
         if st.button("Añadir a watchlist", type="primary", use_container_width=True):
             if new_t and len(new_t.strip()) > 0:
                 t_clean = new_t.strip().upper()
-                # Obtener precio actual antes de guardar
-                try:
-                    h_t, _ = descargar(t_clean, "5d")
-                    if not h_t.empty:
-                        precio_inicial = float(h_t["Close"].iloc[-1])
-                        if watchlist_add(t_clean, precio_inicial, new_n):
-                            st.success(f"✅ {t_clean} añadido a watchlist")
-                            st.rerun()
-                        else:
-                            st.warning(f"⚠️ {t_clean} ya está en la watchlist")
+                precio_inicial, error_p = _get_precio_actual(t_clean)
+                if precio_inicial is not None:
+                    if watchlist_add(t_clean, precio_inicial, new_n):
+                        st.success(f"✅ {t_clean} añadido (${precio_inicial:.2f})")
+                        st.rerun()
                     else:
-                        st.error(f"No se pudo obtener precio de {t_clean}")
-                except Exception as e:
-                    st.error(f"Error: {e}")
+                        st.warning(f"⚠️ {t_clean} ya está en la watchlist")
+                else:
+                    st.error(f"No se pudo obtener precio de {t_clean}")
+                    st.caption(f"Detalles: {error_p}")
             else:
                 st.error("Introduce un ticker válido")
 
@@ -2515,24 +2736,25 @@ elif pagina == "📈 Análisis Individual":
         st.divider()
         go_btn    = st.button("🚀 Analizar", type="primary", use_container_width=True)
 
-        # Botón añadir a watchlist
-        if GSPREAD_AVAILABLE and ticker_in:
-            if st.button(f"⭐ Seguir {ticker_in.upper().strip()}",
+        # Botón añadir a watchlist (siempre visible)
+        if ticker_in and ticker_in.strip():
+            t_clean = ticker_in.upper().strip()
+            if st.button(f"⭐ Seguir {t_clean}",
                           use_container_width=True, key="wl_ai_btn"):
-                t_clean = ticker_in.upper().strip()
-                try:
-                    h_t, _ = descargar(t_clean, "5d")
-                    if not h_t.empty:
-                        precio_inicial = float(h_t["Close"].iloc[-1])
+                err = _get_watchlist_error()
+                if err:
+                    st.error(f"⚠️ Watchlist no disponible: {err}")
+                else:
+                    precio_inicial, error_p = _get_precio_actual(t_clean)
+                    if precio_inicial is not None:
                         nota = "Añadido desde Análisis Individual"
                         if watchlist_add(t_clean, precio_inicial, nota):
-                            st.success(f"✅ {t_clean} añadido a watchlist")
+                            st.success(f"✅ {t_clean} añadido a watchlist (${precio_inicial:.2f})")
                         else:
                             st.info(f"ℹ️ {t_clean} ya estaba en watchlist")
                     else:
                         st.error(f"No se pudo obtener precio de {t_clean}")
-                except Exception as e:
-                    st.error(f"Error: {e}")
+                        st.caption(f"Detalles: {error_p}")
 
     if go_btn and ticker_in:
         ticker_in = ticker_in.upper().strip()
