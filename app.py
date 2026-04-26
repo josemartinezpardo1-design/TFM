@@ -65,6 +65,28 @@ FMP_BASE = "https://financialmodelingprep.com/api/v3"
 # ╔═══════════════════════════════════════════════════════════════╗
 # ║  HELPER FMP                                                   ║
 # ╚═══════════════════════════════════════════════════════════════╝
+
+# ╔═══════════════════════════════════════════════════════════════╗
+# ║  HELPERS GLOBALES — colores, formato                          ║
+# ╚═══════════════════════════════════════════════════════════════╝
+def _color_pct(v):
+    """Colorea valores de porcentaje: verde si positivo, rojo si negativo."""
+    if pd.isna(v):
+        return ""
+    return "color: #50fa7b" if v > 0 else "color: #ff5555"
+
+
+def _color_score(v):
+    """Colorea scores 0-100: verde fuerte si >=80, amarillo >=60."""
+    if pd.isna(v):
+        return ""
+    if v >= 80:
+        return "color: #50fa7b; font-weight: bold"
+    if v >= 60:
+        return "color: #f1fa8c"
+    return ""
+
+
 @st.cache_data(ttl=3600)
 def fmp_get(endpoint: str):
     """GET a FMP endpoint; returns parsed JSON or None."""
@@ -800,7 +822,6 @@ def get_russell1000():
     return universe
 
 
-
 # ╔═══════════════════════════════════════════════════════════════╗
 # ║  WATCHLIST — Persistencia en Google Sheets                    ║
 # ╚═══════════════════════════════════════════════════════════════╝
@@ -1457,12 +1478,9 @@ if pagina == "🌅 Outlook":
                     avg_chg = float(df_wlo["Hoy %"].mean())
                     col_w3.metric("Cambio medio", f"{avg_chg:+.2f}%")
 
-                    def color_chg(v):
-                        if pd.isna(v): return ""
-                        return "color: #50fa7b" if v > 0 else "color: #ff5555"
 
                     st.dataframe(
-                        df_wlo.style.applymap(color_chg,
+                        df_wlo.style.map(_color_pct,
                             subset=["Hoy %","Desde alta %"]),
                         use_container_width=True, hide_index=True
                     )
@@ -1786,8 +1804,6 @@ elif pagina == "🔍 Screener":
                                        f"screener_{indice}_{modo}.csv", "text/csv")
     else:
         st.info("👈 Configura y pulsa **Ejecutar**.")
-
-
 
 
 # ╔═══════════════════════════════════════════════════════════════╗
@@ -2283,20 +2299,11 @@ elif pagina == "🔎 Descubrimiento":
                 "Señales":   r["Señales"],
             } for r in top_res])
 
-            def color_cambio(val):
-                if pd.isna(val): return ""
-                return "color: #50fa7b" if val > 0 else "color: #ff5555"
-
-            def color_score(val):
-                if pd.isna(val): return ""
-                if val >= 80: return "color: #50fa7b; font-weight: bold"
-                if val >= 60: return "color: #f1fa8c"
-                return ""
 
             st.dataframe(
                 df_res.style
-                    .applymap(color_cambio, subset=["Cambio %","Alpha %","Mom 5d %"])
-                    .applymap(color_score,  subset=["Score"]),
+                    .map(_color_pct, subset=["Cambio %","Alpha %","Mom 5d %"])
+                    .map(_color_score,  subset=["Score"]),
                 use_container_width=True,
                 hide_index=True
             )
@@ -2639,13 +2646,10 @@ elif pagina == "⭐ Watchlist":
     # Tabla con coloreado
     st.markdown("### 📊 Tabla de seguimiento")
 
-    def color_pct(v):
-        if pd.isna(v): return ""
-        return "color: #50fa7b" if v > 0 else "color: #ff5555"
 
     st.dataframe(
-        df_wl_view.style.applymap(
-            color_pct,
+        df_wl_view.style.map(
+            _color_pct,
             subset=["Hoy %","Desde alta %","Alpha SPY %","Mom 5d %","Mom 20d %"]
         ),
         use_container_width=True,
@@ -3468,13 +3472,13 @@ elif pagina == "📊 Macro":
 
         if not df_rf.empty:
             # Color condicional para rendimientos
-            def color_pct(val):
+            def _color_pct(val):
                 if pd.isna(val): return ""
                 color = "#50fa7b" if val >= 0 else "#ff5555"
                 return f"color: {color}"
 
             st.dataframe(
-                df_rf.style.applymap(color_pct, subset=["1D %","1M %","YTD %"]),
+                df_rf.style.map(_color_pct, subset=["1D %","1M %","YTD %"]),
                 use_container_width=True, hide_index=True)
 
             # Gráfico comparativo
