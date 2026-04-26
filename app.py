@@ -8,6 +8,8 @@ Novedades v4:
   · Diversificación sectorial en Cartera con 3 perfiles: Agresivo / Neutro / Balanceado
 """
 
+import os
+import json
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -36,6 +38,13 @@ except Exception:
     pass
 
 fred_client = None
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    GSPREAD_AVAILABLE = True
+except ImportError:
+    GSPREAD_AVAILABLE = False
+
 try:
     from fredapi import Fred
     _k = st.secrets.get("FRED_KEY", "")
@@ -790,6 +799,102 @@ def get_russell1000():
     universe = list(dict.fromkeys(SP500_TICKERS + SP400_TICKERS))
     return universe
 
+
+
+# ╔═══════════════════════════════════════════════════════════════╗
+# ║  WATCHLIST — Persistencia en Google Sheets                    ║
+# ╚═══════════════════════════════════════════════════════════════╝
+WATCHLIST_SHEET_ID = "1Yj2KkMypva14ZzpbnP9hDMexhzDGljWU6yhtnsVN980"
+WATCHLIST_TAB      = "watchlist"
+WATCHLIST_COLS     = ["fecha_anadido", "ticker", "precio_inicial", "nota"]
+
+@st.cache_resource
+def get_watchlist_ws():
+    """Conecta a Google Sheets y retorna el worksheet de watchlist (lo crea si no existe)."""
+    if not GSPREAD_AVAILABLE:
+        return None
+    try:
+        # Las credenciales vienen de Streamlit secrets
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds = Credentials.from_service_account_info(
+            creds_dict,
+            scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+        client = gspread.authorize(creds)
+        sh = client.open_by_key(WATCHLIST_SHEET_ID)
+        try:
+            ws = sh.worksheet(WATCHLIST_TAB)
+        except gspread.exceptions.WorksheetNotFound:
+            ws = sh.add_worksheet(title=WATCHLIST_TAB, rows=1000, cols=10)
+            ws.append_row(WATCHLIST_COLS)
+        return ws
+    except Exception as e:
+        return None
+
+def watchlist_load():
+    """Carga la watchlist desde Google Sheets como DataFrame."""
+    ws = get_watchlist_ws()
+    if ws is None:
+        return pd.DataFrame(columns=WATCHLIST_COLS)
+    try:
+        data = ws.get_all_records()
+        if not data:
+            return pd.DataFrame(columns=WATCHLIST_COLS)
+        df = pd.DataFrame(data)
+        for c in WATCHLIST_COLS:
+            if c not in df.columns:
+                df[c] = ""
+        return df[WATCHLIST_COLS]
+    except Exception:
+        return pd.DataFrame(columns=WATCHLIST_COLS)
+
+def watchlist_add(ticker, precio_inicial, nota=""):
+    """Añade un ticker a la watchlist. Retorna True si tuvo éxito, False si ya existía."""
+    ws = get_watchlist_ws()
+    if ws is None:
+        return False
+    try:
+        df = watchlist_load()
+        if ticker.upper() in df["ticker"].astype(str).str.upper().values:
+            return False  # ya existe
+        fecha = datetime.now().strftime("%Y-%m-%d")
+        ws.append_row([fecha, ticker.upper(), float(precio_inicial), str(nota)])
+        return True
+    except Exception as e:
+        st.error(f"Error guardando en Sheets: {e}")
+        return False
+
+def watchlist_remove(ticker):
+    """Elimina un ticker de la watchlist."""
+    ws = get_watchlist_ws()
+    if ws is None:
+        return False
+    try:
+        all_vals = ws.get_all_values()
+        if len(all_vals) <= 1:
+            return False
+        # Buscar fila del ticker (1-indexed, +1 por header)
+        for i, row in enumerate(all_vals[1:], start=2):
+            if len(row) >= 2 and row[1].upper() == ticker.upper():
+                ws.delete_rows(i)
+                return True
+        return False
+    except Exception:
+        return False
+
+def watchlist_clear():
+    """Vacía toda la watchlist (deja header)."""
+    ws = get_watchlist_ws()
+    if ws is None:
+        return False
+    try:
+        ws.clear()
+        ws.append_row(WATCHLIST_COLS)
+        return True
+    except Exception:
+        return False
+
+
 INDICES = {
     "SP500":      ("🇺🇸 S&P 500",         get_sp500),
     "SP400":      ("🇺🇸 S&P 400 MidCap",  get_sp400),
@@ -1108,6 +1213,7 @@ with st.sidebar:
         "🌅 Outlook",
         "🔍 Screener",
         "🔎 Descubrimiento",
+        "⭐ Watchlist",
         "📈 Análisis Individual",
         "💼 Cartera",
         "📊 Macro",
@@ -1125,110 +1231,236 @@ with st.sidebar:
 # ║  MORNING OUTLOOK                                              ║
 # ╚═══════════════════════════════════════════════════════════════╝
 if pagina == "🌅 Outlook":
-    st.header("🌅 Morning Outlook — Resumen de Mercado")
-    st.caption(f"📅 {datetime.now().strftime('%d/%m/%Y %H:%M')} UTC")
+    st.header("🌅 Resumen Ejecutivo del Mercado")
+    st.markdown("Vista de 30 segundos del estado del mercado y tu cartera personal.")
 
-    with st.spinner("Cargando datos de mercado..."):
-        indices = {
-            "^GSPC":"S&P 500","^IXIC":"Nasdaq","^DJI":"Dow Jones",
-            "^STOXX50E":"Euro Stoxx 50","^IBEX":"IBEX 35","^GDAXI":"DAX 40",
-            "^N225":"Nikkei 225","^HSI":"Hang Seng",
-        }
-        idx_data = []
-        for sym, name in indices.items():
-            h, _ = descargar(sym, "6mo")
-            if not h.empty and len(h) > 2:
-                last = h["Close"].iloc[-1]; prev = h["Close"].iloc[-2]
-                chg   = (last / prev - 1) * 100
-                chg_m = (last / h["Close"].iloc[-22] - 1) * 100 if len(h) > 22 else np.nan
-                chg_y = (last / h["Close"].iloc[0] - 1) * 100
-                idx_data.append({"Índice": name, "Último": round(last, 2),
-                                  "Día %": round(chg, 2),
-                                  "Mes %": round(chg_m, 2) if pd.notna(chg_m) else None,
-                                  "YTD %": round(chg_y, 2)})
-            time.sleep(0.3)
+    refresh_outlook = st.button("🔄 Actualizar", type="primary")
 
-    if idx_data:
-        st.subheader("🌍 Índices Principales")
-        df_idx = pd.DataFrame(idx_data)
-        cols = st.columns(4)
-        for i, row in df_idx.iterrows():
-            with cols[i % 4]:
-                st.metric(row["Índice"], f"{row['Último']:,.2f}", f"{row['Día %']:+.2f}%")
-        st.dataframe(df_idx, use_container_width=True, hide_index=True)
-        st.caption("📡 Fuente: Finnhub / Yahoo Finance")
+    # ── 1. Estado del mercado global ─────────────────────────────
+    st.markdown("### 📊 Mercado global")
 
-    # Sectores
-    st.subheader("📊 Rendimiento Sectorial (1 día)")
-    sectores = {
-        "XLK":"Tecnología","XLF":"Financiero","XLE":"Energía","XLV":"Salud",
-        "XLY":"Cons. Discrecional","XLP":"Cons. Básico","XLI":"Industrial",
-        "XLU":"Utilities","XLB":"Materiales","XLRE":"Inmobiliario","XLC":"Comunicación",
+    market_indices = {
+        "S&P 500":       "^GSPC",
+        "Nasdaq":        "^IXIC",
+        "Dow Jones":     "^DJI",
+        "Russell 2000":  "^RUT",
+        "VIX":           "^VIX",
+        "DAX":           "^GDAXI",
+        "FTSE 100":      "^FTSE",
+        "Nikkei":        "^N225",
     }
-    sec_data = []
-    with st.spinner("Cargando sectores..."):
-        for sym, name in sectores.items():
-            h, _ = descargar(sym, "6mo")
-            if not h.empty and len(h) > 2:
-                chg = (h["Close"].iloc[-1] / h["Close"].iloc[-2] - 1) * 100
-                sec_data.append({"Sector": name, "Ticker": sym, "Cambio %": round(chg, 2)})
-            time.sleep(0.2)
-    if sec_data:
-        df_sec = pd.DataFrame(sec_data).sort_values("Cambio %", ascending=False)
-        colors = ["#50fa7b" if v >= 0 else "#ff5555" for v in df_sec["Cambio %"]]
-        fig_sec = go.Figure(go.Bar(
-            x=df_sec["Sector"], y=df_sec["Cambio %"], marker_color=colors,
-            text=[f"{v:+.2f}%" for v in df_sec["Cambio %"]], textposition="outside"))
-        fig_sec.update_layout(title="Mapa Sectorial — Cambio Diario", template="plotly_dark",
-                               paper_bgcolor="#12121f", plot_bgcolor="#1e1e2e",
-                               height=400, yaxis_title="%")
-        st.plotly_chart(fig_sec, use_container_width=True)
-        st.caption("📡 ETFs sectoriales SPDR vía Finnhub / Yahoo Finance")
 
-    # Macro rápido
-    if fred_client:
-        st.subheader("📈 Indicadores Macro (FRED)")
-        macro_ids = {"Fed Funds Rate":"FEDFUNDS","US 10Y":"DGS10","US 2Y":"DGS2",
-                     "CPI YoY":"CPIAUCSL","Desempleo":"UNRATE","VIX":"VIXCLS"}
-        mc = st.columns(3); i = 0
-        for name, sid in macro_ids.items():
-            v = get_last_fred(sid)
-            if v is not None:
-                with mc[i % 3]:
-                    st.metric(name, f"{v:.2f}")
-                i += 1
-
-    # Noticias
-    if fh_client:
-        st.subheader("📰 Noticias del Mercado")
-        st.caption("📡 Finnhub News API")
+    with st.spinner("Cargando estado del mercado..."):
+        market_data = []
         try:
-            news = fh_client.general_news("general", min_id=0)
-            if news:
-                for a in news[:8]:
-                    c1, c2 = st.columns([3, 1])
-                    with c1:
-                        st.markdown(f"**{a.get('headline', 'Sin título')}**")
-                        st.caption(f"{a.get('source','')} — {datetime.fromtimestamp(a.get('datetime',0)).strftime('%d/%m %H:%M')}")
-                        s = a.get("summary", "")
-                        if s: st.caption(s[:200] + "..." if len(s) > 200 else s)
-                    with c2:
-                        if a.get("url"): st.link_button("Leer →", a["url"])
-                    st.divider()
-        except Exception:
-            st.info("No se pudieron cargar noticias.")
+            symbols   = list(market_indices.values())
+            data_mkt  = yf.download(symbols, period="5d",
+                                     auto_adjust=True, progress=False)
 
+            for nombre, sym in market_indices.items():
+                try:
+                    if isinstance(data_mkt.columns, pd.MultiIndex):
+                        c = data_mkt["Close"][sym].dropna()
+                    else:
+                        c = data_mkt["Close"].dropna()
 
-# ╔═══════════════════════════════════════════════════════════════╗
-# ║  SCREENER                                                     ║
-# ╚═══════════════════════════════════════════════════════════════╝
+                    if len(c) >= 2:
+                        precio = float(c.iloc[-1])
+                        chg    = (precio / float(c.iloc[-2]) - 1) * 100
+                        market_data.append({
+                            "Índice": nombre,
+                            "Valor":  round(precio, 2),
+                            "Cambio %": round(chg, 2)
+                        })
+                except Exception:
+                    continue
+        except Exception as e:
+            st.error(f"Error descargando índices: {e}")
+
+    if market_data:
+        # Mostrar como tarjetas
+        cols = st.columns(4)
+        for i, m_d in enumerate(market_data):
+            chg = m_d["Cambio %"]
+            col = cols[i % 4]
+            with col:
+                arrow = "▲" if chg >= 0 else "▼"
+                color = "#27ae60" if chg >= 0 else "#e74c3c"
+                st.markdown(f"""
+                <div style="background:#1e1e2e;padding:12px;border-radius:6px;
+                            border-left:3px solid {color};margin-bottom:8px">
+                  <div style="font-size:12px;color:#888">{m_d['Índice']}</div>
+                  <div style="font-size:18px;font-weight:bold;color:#f8f8f2">{m_d['Valor']:,}</div>
+                  <div style="font-size:13px;color:{color};font-weight:bold">
+                    {arrow} {chg:+.2f}%
+                  </div>
+                </div>""", unsafe_allow_html=True)
+
+        # Calcular régimen general
+        spy_chg_o = next((m["Cambio %"] for m in market_data if m["Índice"] == "S&P 500"), None)
+        vix_val   = next((m["Valor"] for m in market_data if m["Índice"] == "VIX"), None)
+
+        if spy_chg_o is not None and vix_val is not None:
+            if   spy_chg_o > 1.0 and vix_val < 18:  regimen_o, color_r = "Risk-ON fuerte", "#27ae60"
+            elif spy_chg_o > 0.2:                   regimen_o, color_r = "Risk-ON",        "#2ecc71"
+            elif spy_chg_o > -0.2:                  regimen_o, color_r = "Neutro",         "#f39c12"
+            elif spy_chg_o > -1.0:                  regimen_o, color_r = "Risk-OFF",       "#e74c3c"
+            else:                                   regimen_o, color_r = "Risk-OFF fuerte","#c0392b"
+
+            st.markdown(f"""
+            <div style="background:#1e1e2e;padding:14px;border-radius:6px;
+                        border-left:4px solid {color_r};margin-top:8px">
+              <span style="color:#888;font-size:13px">Régimen actual:</span>
+              <span style="color:{color_r};font-size:16px;font-weight:bold;margin-left:8px">
+                {regimen_o}
+              </span>
+              <span style="color:#888;font-size:12px;margin-left:12px">
+                (S&P {spy_chg_o:+.2f}% | VIX {vix_val})
+              </span>
+            </div>""", unsafe_allow_html=True)
+
+    st.divider()
+
+    # ── 2. Tu watchlist ─────────────────────────────────────────
+    st.markdown("### ⭐ Tu watchlist")
+
+    df_wl_o = watchlist_load() if GSPREAD_AVAILABLE else pd.DataFrame()
+    if df_wl_o.empty:
+        st.info("No tienes tickers en watchlist. Ve a ⭐ Watchlist para añadir alguno.")
+    else:
+        with st.spinner(f"Cargando {len(df_wl_o)} tickers de tu watchlist..."):
+            try:
+                tickers_wl = df_wl_o["ticker"].tolist()
+                if len(tickers_wl) == 1:
+                    h, _ = descargar(tickers_wl[0], "5d")
+                    wl_dat = h
+                    closes_dict = {tickers_wl[0]: h["Close"]} if not h.empty else {}
+                else:
+                    wl_dat = yf.download(tickers_wl, period="5d",
+                                          auto_adjust=True, progress=False)
+                    closes_dict = {}
+                    if isinstance(wl_dat.columns, pd.MultiIndex):
+                        for t in tickers_wl:
+                            if t in wl_dat.columns.get_level_values(1):
+                                closes_dict[t] = wl_dat["Close"][t].dropna()
+
+                wl_rows = []
+                for _, row_db in df_wl_o.iterrows():
+                    t = row_db["ticker"]
+                    if t not in closes_dict: continue
+                    c = closes_dict[t]
+                    if len(c) >= 2:
+                        precio = float(c.iloc[-1])
+                        chg    = (precio / float(c.iloc[-2]) - 1) * 100
+                        # Retorno desde alta
+                        ret_alta = None
+                        try:
+                            p_inicial = float(row_db["precio_inicial"])
+                            if p_inicial > 0:
+                                ret_alta = (precio / p_inicial - 1) * 100
+                        except Exception:
+                            pass
+                        wl_rows.append({
+                            "Ticker":      t,
+                            "Precio":      round(precio, 2),
+                            "Cambio %":    round(chg, 2),
+                            "Desde alta %": round(ret_alta, 2) if ret_alta is not None else None,
+                            "Alta":        row_db["fecha_anadido"],
+                        })
+
+                if wl_rows:
+                    df_wlo = pd.DataFrame(wl_rows).sort_values("Cambio %", ascending=False)
+
+                    col_w1, col_w2, col_w3 = st.columns(3)
+                    n_up   = int((df_wlo["Cambio %"] > 0).sum())
+                    n_down = int((df_wlo["Cambio %"] < 0).sum())
+                    avg_chg= float(df_wlo["Cambio %"].mean())
+
+                    col_w1.metric("Subiendo", f"{n_up}/{len(df_wlo)}")
+                    col_w2.metric("Bajando", f"{n_down}/{len(df_wlo)}")
+                    col_w3.metric("Cambio medio", f"{avg_chg:+.2f}%")
+
+                    def color_chg_o(v):
+                        if pd.isna(v): return ""
+                        return "color: #50fa7b" if v > 0 else "color: #ff5555"
+
+                    st.dataframe(
+                        df_wlo.style.applymap(color_chg_o,
+                            subset=["Cambio %","Desde alta %"]),
+                        use_container_width=True, hide_index=True
+                    )
+            except Exception as e:
+                st.error(f"Error con watchlist: {e}")
+
+    st.divider()
+
+    # ── 3. Acceso rápido a módulos ──────────────────────────────
+    st.markdown("### 🚀 Acciones rápidas")
+    col_a1, col_a2, col_a3, col_a4 = st.columns(4)
+
+    with col_a1:
+        st.markdown("""
+        <div style="background:#1e1e2e;padding:14px;border-radius:6px;text-align:center">
+          <div style="font-size:24px">🔎</div>
+          <div style="font-weight:bold;color:#8be9fd">Descubrimiento</div>
+          <div style="font-size:11px;color:#888;margin-top:4px">
+            Encuentra anomalías inusuales
+          </div>
+        </div>""", unsafe_allow_html=True)
+
+    with col_a2:
+        st.markdown("""
+        <div style="background:#1e1e2e;padding:14px;border-radius:6px;text-align:center">
+          <div style="font-size:24px">🔍</div>
+          <div style="font-weight:bold;color:#8be9fd">Screener</div>
+          <div style="font-size:11px;color:#888;margin-top:4px">
+            Filtra activos por criterios
+          </div>
+        </div>""", unsafe_allow_html=True)
+
+    with col_a3:
+        st.markdown("""
+        <div style="background:#1e1e2e;padding:14px;border-radius:6px;text-align:center">
+          <div style="font-size:24px">📈</div>
+          <div style="font-weight:bold;color:#8be9fd">Análisis</div>
+          <div style="font-size:11px;color:#888;margin-top:4px">
+            Profundiza en un ticker
+          </div>
+        </div>""", unsafe_allow_html=True)
+
+    with col_a4:
+        st.markdown("""
+        <div style="background:#1e1e2e;padding:14px;border-radius:6px;text-align:center">
+          <div style="font-size:24px">💼</div>
+          <div style="font-weight:bold;color:#8be9fd">Cartera</div>
+          <div style="font-size:11px;color:#888;margin-top:4px">
+            Analiza tu portfolio
+          </div>
+        </div>""", unsafe_allow_html=True)
+
+    st.caption(f"🕐 Última actualización: {datetime.now().strftime('%H:%M %d-%m-%Y')}")
+
 elif pagina == "🔍 Screener":
     with st.sidebar:
         indice  = st.selectbox("Índice", list(INDICES.keys()), format_func=lambda x: INDICES[x][0])
         modo    = st.selectbox("Modo", ["VALUE","MOMENTUM","QUALITY","DIVIDENDOS","TODO"])
-        limite  = st.slider("Tickers", 10, 100, 30, step=10)
+        limite  = st.slider("Tickers a analizar", 10, 500, 50, step=10,
+                            help="Más tickers = análisis más completo pero más lento")
         st.divider()
-        ejecutar = st.button("🚀 Ejecutar", type="primary", use_container_width=True)
+        ejecutar = st.button("🚀 Ejecutar análisis", type="primary", use_container_width=True)
+
+        # Descargar lista de tickers del índice seleccionado
+        st.divider()
+        st.caption("📋 Lista de tickers del índice")
+        tickers_idx = INDICES[indice][1]()
+        df_lista = pd.DataFrame({"Ticker": tickers_idx})
+        st.download_button(
+            f"📥 Descargar {len(tickers_idx)} tickers",
+            df_lista.to_csv(index=False).encode("utf-8"),
+            f"tickers_{indice}.csv",
+            "text/csv",
+            use_container_width=True
+        )
 
     st.header(f"🔍 Screener: {INDICES[indice][0]} — {modo}")
     if ejecutar:
@@ -1332,6 +1564,28 @@ elif pagina == "🔎 Descubrimiento":
         analizar_btn = st.button("🚀 Analizar ahora", type="primary",
                                   use_container_width=True)
 
+        # Descargar lista de tickers de los índices seleccionados
+        if indices_sel:
+            st.divider()
+            st.caption("📋 Lista de tickers del universo")
+            todos_tickers = []
+            for idx_k in indices_sel:
+                todos_tickers.extend(INDICES[idx_k][1]())
+            todos_tickers = list(dict.fromkeys(todos_tickers))
+            df_universo = pd.DataFrame({
+                "Ticker": todos_tickers,
+                "Índice": [next((INDICES[k][0] for k in indices_sel
+                                 if t in INDICES[k][1]()), "?")
+                            for t in todos_tickers]
+            })
+            st.download_button(
+                f"📥 Descargar {len(todos_tickers)} tickers",
+                df_universo.to_csv(index=False).encode("utf-8"),
+                f"universo_descubrimiento.csv",
+                "text/csv",
+                use_container_width=True
+            )
+
     # ── Tickers a excluir (S&P 100 sobreconocidos) ──────────────
     EXCLUIR_MEGACAPS = {
         "AAPL","MSFT","NVDA","GOOGL","GOOG","AMZN","META","TSLA","AVGO","BRK-B",
@@ -1367,9 +1621,12 @@ elif pagina == "🔎 Descubrimiento":
             ma50_val = float(closes.tail(n50).mean())
             ma200_v  = float(closes.tail(200).mean()) if len(closes) >= 200 else None
 
-            # 52w
-            high_52w = float(closes.tail(min(252, len(closes))).max())
-            low_52w  = float(closes.tail(min(252, len(closes))).min())
+            # 52w — usar High/Low reales si están disponibles
+            highs_s = hist["High"] if "High" in hist.columns else closes
+            lows_s  = hist["Low"]  if "Low"  in hist.columns else closes
+            n_52w   = min(252, len(closes))
+            high_52w = float(highs_s.tail(n_52w).max())
+            low_52w  = float(lows_s.tail(n_52w).min())
             rng_52w  = high_52w - low_52w
             pos_52w  = ((precio - low_52w) / rng_52w * 100) if rng_52w > 0 else 50
 
@@ -1392,9 +1649,13 @@ elif pagina == "🔎 Descubrimiento":
             # Alpha vs SPY
             alpha = round(ret_d - spy_chg, 2) if spy_chg is not None else None
 
-            # Gap apertura
+            # Gap apertura: open de hoy vs cierre de ayer
             open_h  = float(hist["Open"].iloc[-1]) if "Open" in hist.columns else precio
-            gap_pct = (open_h / prev_c - 1) * 100 if prev_c > 0 else 0
+            # Si Open == Close, los datos son sólo cierre — gap no fiable
+            if "Open" in hist.columns and abs(open_h - precio) > 0.001:
+                gap_pct = (open_h / prev_c - 1) * 100 if prev_c > 0 else 0
+            else:
+                gap_pct = 0  # sin datos OHLC reales no calculamos gap
 
             # ── SCORES ──────────────────────────────────────────
             scores = {}
@@ -1532,6 +1793,8 @@ elif pagina == "🔎 Descubrimiento":
         all_closes  = {}
         all_volumes = {}
         all_opens   = {}
+        all_highs   = {}
+        all_lows    = {}
 
         for i_lote in range(n_lotes):
             batch = universo[i_lote * LOTE : (i_lote + 1) * LOTE]
@@ -1555,6 +1818,8 @@ elif pagina == "🔎 Descubrimiento":
                             c = raw["Close"].dropna() if "Close" in raw.columns else pd.Series(dtype=float)
                             v = raw["Volume"].dropna() if "Volume" in raw.columns else pd.Series(dtype=float)
                             o = raw["Open"].dropna()  if "Open"  in raw.columns else c
+                            h = raw["High"].dropna()  if "High"  in raw.columns else c
+                            lo = raw["Low"].dropna()  if "Low"   in raw.columns else c
                         else:
                             # Múltiples tickers — MultiIndex (field, ticker)
                             if isinstance(raw.columns, pd.MultiIndex):
@@ -1564,6 +1829,8 @@ elif pagina == "🔎 Descubrimiento":
                                 c = raw["Close"][t].dropna()
                                 v = raw["Volume"][t].dropna()
                                 o = raw["Open"][t].dropna()
+                                h = raw["High"][t].dropna()
+                                lo = raw["Low"][t].dropna()
                             else:
                                 continue
 
@@ -1571,6 +1838,8 @@ elif pagina == "🔎 Descubrimiento":
                             all_closes[t]  = c
                             all_volumes[t] = v
                             all_opens[t]   = o
+                            all_highs[t]   = h
+                            all_lows[t]    = lo
                         else:
                             n_err_d += 1
                     except Exception:
@@ -1597,13 +1866,13 @@ elif pagina == "🔎 Descubrimiento":
             if volumes_s.empty or float(volumes_s.tail(20).mean()) < min_vol_abs:
                 continue
 
-            # Construir hist DataFrame
+            # Construir hist DataFrame con OHLC real
             hist_d = pd.DataFrame({
                 "Close":  closes_s,
                 "Volume": volumes_s,
                 "Open":   all_opens.get(ticker_d, closes_s),
-                "High":   closes_s,  # simplificado para detección
-                "Low":    closes_s,
+                "High":   all_highs.get(ticker_d, closes_s),
+                "Low":    all_lows.get(ticker_d, closes_s),
             }).dropna()
 
             r = detectar_anomalia(hist_d, {}, spy_chg_d, señales_sel)
@@ -1697,6 +1966,17 @@ elif pagina == "🔎 Descubrimiento":
                         f"https://www.tradingview.com/chart/?symbol={ticker_r}",
                         use_container_width=True)
 
+                    # Botón añadir a watchlist
+                    if st.button(f"⭐ Seguir {ticker_r}",
+                                 key=f"wl_disc_{ticker_r}_{i}",
+                                 use_container_width=True):
+                        signal_str = r["Señales"]
+                        notes = f"Detectado por agente — {signal_str} | Score: {r['Score']}/100"
+                        if watchlist_add(ticker_r, r["Precio"], notes):
+                            st.success(f"✅ {ticker_r} añadido a watchlist")
+                        else:
+                            st.info(f"ℹ️ {ticker_r} ya estaba en watchlist")
+
             st.divider()
 
             # Tabla resumen
@@ -1740,6 +2020,351 @@ elif pagina == "🔎 Descubrimiento":
                 f"Actualizado: {datetime.now().strftime('%H:%M UTC')}"
             )
 
+            # ── Descarga CSV de resultados ─────────────────────────
+            st.divider()
+            col_dl1, col_dl2 = st.columns(2)
+            with col_dl1:
+                st.download_button(
+                    f"📥 Descargar TOP {len(top_res)} (CSV)",
+                    df_res.to_csv(index=False).encode("utf-8"),
+                    f"descubrimiento_top_{datetime.now().strftime('%Y-%m-%d')}.csv",
+                    "text/csv",
+                    use_container_width=True,
+                    type="primary"
+                )
+            with col_dl2:
+                # Descargar TODAS las anomalías (no solo top N)
+                df_all = pd.DataFrame([{
+                    "Ticker":    r["Ticker"],
+                    "Precio":    r["Precio"],
+                    "Cambio %":  r["Cambio %"],
+                    "Alpha %":   r["Alpha"],
+                    "Vol×":      r["Vol×"],
+                    "RSI":       r["RSI"],
+                    "Pos 52w %": r["Pos 52w %"],
+                    "Mom 5d %":  r["Mom 5d %"],
+                    "Mom 20d %": r["Mom 20d %"],
+                    "vs MA50 %": r["vs MA50 %"],
+                    "Score":     r["Score"],
+                    "Señales":   r["Señales"],
+                } for r in resultados_d])
+                st.download_button(
+                    f"📥 Descargar TODAS ({len(resultados_d)}) (CSV)",
+                    df_all.to_csv(index=False).encode("utf-8"),
+                    f"descubrimiento_all_{datetime.now().strftime('%Y-%m-%d')}.csv",
+                    "text/csv",
+                    use_container_width=True
+                )
+
+
+# ╔═══════════════════════════════════════════════════════════════╗
+# ║  WATCHLIST — Tickers seguidos con tracking histórico          ║
+# ╚═══════════════════════════════════════════════════════════════╝
+elif pagina == "⭐ Watchlist":
+    st.header("⭐ Mi Watchlist")
+    st.markdown("Tickers que estás siguiendo de cerca con tracking de su evolución desde que los añadiste.")
+
+    if not GSPREAD_AVAILABLE:
+        st.error("⚠️ La librería `gspread` no está instalada. Añade `gspread` y `google-auth` a `requirements.txt`")
+        st.stop()
+
+    # ── Cargar watchlist desde Google Sheets ─────────────────────
+    df_wl_db = watchlist_load()
+
+    with st.sidebar:
+        st.markdown("### ➕ Añadir ticker")
+        new_t = st.text_input("Ticker (ej: AAPL, NESN.SW)", key="add_wl_input")
+        new_n = st.text_area("Nota (opcional)", key="notes_wl_input",
+                              placeholder="¿Por qué estás siguiendo este ticker?")
+
+        if st.button("Añadir a watchlist", type="primary", use_container_width=True):
+            if new_t and len(new_t.strip()) > 0:
+                t_clean = new_t.strip().upper()
+                # Obtener precio actual antes de guardar
+                try:
+                    h_t, _ = descargar(t_clean, "5d")
+                    if not h_t.empty:
+                        precio_inicial = float(h_t["Close"].iloc[-1])
+                        if watchlist_add(t_clean, precio_inicial, new_n):
+                            st.success(f"✅ {t_clean} añadido a watchlist")
+                            st.rerun()
+                        else:
+                            st.warning(f"⚠️ {t_clean} ya está en la watchlist")
+                    else:
+                        st.error(f"No se pudo obtener precio de {t_clean}")
+                except Exception as e:
+                    st.error(f"Error: {e}")
+            else:
+                st.error("Introduce un ticker válido")
+
+        st.divider()
+        st.caption(f"📋 {len(df_wl_db)} tickers en seguimiento")
+
+        if not df_wl_db.empty:
+            st.download_button(
+                "📥 Descargar watchlist",
+                df_wl_db.to_csv(index=False).encode("utf-8"),
+                "watchlist.csv",
+                "text/csv",
+                use_container_width=True
+            )
+
+            with st.expander("🗑️ Vaciar watchlist completa"):
+                st.warning("Esto borrará todos los tickers seguidos.")
+                if st.button("Confirmar vaciado", type="secondary"):
+                    if watchlist_clear():
+                        st.success("Watchlist vaciada")
+                        st.rerun()
+
+    if df_wl_db.empty:
+        st.info(
+            "👋 **Tu watchlist está vacía.**\n\n"
+            "Añade tickers desde el panel lateral, o desde:\n"
+            "- 🔎 **Descubrimiento** — botón ⭐ Seguir en cada anomalía\n"
+            "- 📈 **Análisis Individual** — botón ⭐ Añadir tras analizar"
+        )
+        st.stop()
+
+    # ── Descargar precios actuales ───────────────────────────────
+    st.markdown(f"### 📊 Estado actual de tus {len(df_wl_db)} tickers")
+
+    col_top1, col_top2 = st.columns([1, 4])
+    with col_top1:
+        refresh_btn = st.button("🔄 Actualizar", type="primary", use_container_width=True)
+
+    if refresh_btn or "wl_data" not in st.session_state:
+        with st.spinner(f"Descargando datos de {len(df_wl_db)} tickers..."):
+            tickers_list = df_wl_db["ticker"].tolist()
+            try:
+                # SPY de referencia
+                spy_h, _ = descargar("^GSPC", "3mo")
+                st.session_state["wl_spy"] = spy_h
+
+                if len(tickers_list) == 1:
+                    h, _ = descargar(tickers_list[0], "3mo")
+                    if not h.empty:
+                        st.session_state["wl_data"] = {tickers_list[0]: h}
+                    else:
+                        st.session_state["wl_data"] = {}
+                else:
+                    bulk = yf.download(tickers_list, period="3mo",
+                                       auto_adjust=True, progress=False)
+                    wl_data = {}
+                    for t in tickers_list:
+                        try:
+                            if isinstance(bulk.columns, pd.MultiIndex):
+                                if t in bulk.columns.get_level_values(1):
+                                    h = pd.DataFrame({
+                                        "Close": bulk["Close"][t],
+                                        "Volume": bulk["Volume"][t] if "Volume" in bulk.columns.get_level_values(0) else pd.Series()
+                                    }).dropna()
+                                    if not h.empty:
+                                        wl_data[t] = h
+                        except Exception:
+                            continue
+                    st.session_state["wl_data"] = wl_data
+
+                st.session_state["wl_last_refresh"] = datetime.now()
+            except Exception as e:
+                st.error(f"Error descargando: {e}")
+                st.stop()
+
+    wl_data = st.session_state.get("wl_data", {})
+    spy_h   = st.session_state.get("wl_spy", pd.DataFrame())
+    last_refresh = st.session_state.get("wl_last_refresh", datetime.now())
+
+    with col_top2:
+        st.caption(f"🕐 Última actualización: {last_refresh.strftime('%H:%M %d-%m-%Y')}")
+
+    if not wl_data:
+        st.warning("No se pudieron obtener datos. Pulsa Actualizar.")
+        st.stop()
+
+    # ── Construir tabla de tracking ──────────────────────────────
+    rows = []
+    for _, row_db in df_wl_db.iterrows():
+        t          = row_db["ticker"]
+        d_alta_str = row_db["fecha_anadido"]
+        precio_alta = float(row_db["precio_inicial"]) if row_db["precio_inicial"] else None
+
+        if t not in wl_data:
+            continue
+        h = wl_data[t]
+        if h.empty or len(h) < 2:
+            continue
+
+        try:
+            closes  = h["Close"]
+            precio  = float(closes.iloc[-1])
+            ayer    = float(closes.iloc[-2])
+            chg_dia = (precio / ayer - 1) * 100
+
+            # Retorno desde alta
+            ret_alta = None
+            if precio_alta and precio_alta > 0:
+                ret_alta = (precio / precio_alta - 1) * 100
+
+            # Días en watchlist
+            dias = ""
+            try:
+                f_alta = datetime.strptime(d_alta_str, "%Y-%m-%d")
+                dias = (datetime.now() - f_alta).days
+            except Exception:
+                pass
+
+            # Alpha vs SPY desde alta
+            alpha_spy = None
+            try:
+                if not spy_h.empty and d_alta_str:
+                    f_alta_dt = pd.to_datetime(d_alta_str)
+                    spy_desde = spy_h[spy_h.index >= f_alta_dt]
+                    if len(spy_desde) >= 2 and ret_alta is not None:
+                        spy_ret = (float(spy_desde["Close"].iloc[-1]) /
+                                   float(spy_desde["Close"].iloc[0]) - 1) * 100
+                        alpha_spy = ret_alta - spy_ret
+            except Exception:
+                pass
+
+            # Mom y pos 52w
+            mom_5d  = (precio/float(closes.iloc[-6])-1)*100  if len(closes)>5  else None
+            mom_20d = (precio/float(closes.iloc[-21])-1)*100 if len(closes)>20 else None
+
+            high_52w = float(closes.tail(min(252, len(closes))).max())
+            low_52w  = float(closes.tail(min(252, len(closes))).min())
+            rng_52w  = high_52w - low_52w
+            pos_52w  = ((precio - low_52w)/rng_52w*100) if rng_52w > 0 else 50
+
+            rows.append({
+                "Ticker":       t,
+                "Precio":       round(precio, 2),
+                "Hoy %":        round(chg_dia, 2),
+                "Desde alta %": round(ret_alta, 2) if ret_alta is not None else None,
+                "Alpha SPY %":  round(alpha_spy, 2) if alpha_spy is not None else None,
+                "Mom 5d %":     round(mom_5d, 1)  if mom_5d  is not None else None,
+                "Mom 20d %":    round(mom_20d, 1) if mom_20d is not None else None,
+                "Pos 52w %":    round(pos_52w, 1),
+                "Días":         dias,
+                "Alta":         d_alta_str,
+                "Nota":         row_db.get("nota", "") or "",
+            })
+        except Exception:
+            continue
+
+    if not rows:
+        st.warning("No se pudieron procesar datos.")
+        st.stop()
+
+    df_wl_view = pd.DataFrame(rows)
+
+    # Métricas resumen
+    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+    col_m1.metric("Tickers", len(df_wl_view))
+    col_m2.metric("Subidas hoy", int((df_wl_view["Hoy %"] > 0).sum()))
+    if "Desde alta %" in df_wl_view.columns:
+        winners = df_wl_view["Desde alta %"].dropna()
+        if len(winners) > 0:
+            col_m3.metric(
+                "En verde desde alta",
+                f"{int((winners > 0).sum())}/{len(winners)}"
+            )
+    if "Alpha SPY %" in df_wl_view.columns:
+        alpha_pos = df_wl_view["Alpha SPY %"].dropna()
+        if len(alpha_pos) > 0:
+            col_m4.metric(
+                "Batiendo al SPY",
+                f"{int((alpha_pos > 0).sum())}/{len(alpha_pos)}"
+            )
+
+    # Tabla con coloreado
+    st.markdown("### 📊 Tabla de seguimiento")
+
+    def color_pct(v):
+        if pd.isna(v): return ""
+        return "color: #50fa7b" if v > 0 else "color: #ff5555"
+
+    st.dataframe(
+        df_wl_view.style.applymap(
+            color_pct,
+            subset=["Hoy %","Desde alta %","Alpha SPY %","Mom 5d %","Mom 20d %"]
+        ),
+        use_container_width=True,
+        hide_index=True,
+        height=min(500, 60 + 36 * len(df_wl_view))
+    )
+
+    # ── Detalle individual ───────────────────────────────────────
+    st.divider()
+    st.markdown("### 🔍 Detalle individual")
+
+    sel_ticker = st.selectbox(
+        "Selecciona un ticker para ver detalles",
+        options=df_wl_db["ticker"].tolist(),
+        format_func=lambda x: f"⭐ {x}"
+    )
+
+    if sel_ticker and sel_ticker in wl_data:
+        col_d1, col_d2 = st.columns([3, 1])
+        h = wl_data[sel_ticker]
+
+        with col_d1:
+            try:
+                fig = px.line(x=h.index, y=h["Close"].values,
+                              title=f"📈 {sel_ticker} — últimos 3 meses",
+                              labels={"x": "Fecha", "y": "Precio ($)"})
+
+                row_db = df_wl_db[df_wl_db["ticker"] == sel_ticker].iloc[0]
+                d_alta_str = row_db["fecha_anadido"]
+                if d_alta_str:
+                    try:
+                        f_alta = pd.to_datetime(d_alta_str)
+                        if f_alta >= h.index.min():
+                            fig.add_vline(
+                                x=f_alta, line_dash="dash",
+                                line_color="#8be9fd",
+                                annotation_text="Añadido",
+                                annotation_position="top"
+                            )
+                    except Exception:
+                        pass
+
+                fig.update_layout(
+                    template="plotly_dark", height=400,
+                    paper_bgcolor="#12121f", plot_bgcolor="#1e1e2e"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.error(f"Error gráfico: {e}")
+
+        with col_d2:
+            row_db = df_wl_db[df_wl_db["ticker"] == sel_ticker].iloc[0]
+            st.markdown(f"**📅 Añadido:** {row_db['fecha_anadido']}")
+            st.markdown(f"**💰 Precio inicial:** ${row_db['precio_inicial']}")
+
+            nota = row_db.get("nota", "")
+            if nota and str(nota).strip():
+                st.markdown("**📝 Nota:**")
+                st.info(nota)
+
+            st.divider()
+            ticker_clean = sel_ticker.split(".")[0]
+            st.link_button("📊 Finviz",
+                f"https://finviz.com/quote.ashx?t={ticker_clean}",
+                use_container_width=True)
+            st.link_button("📰 Noticias",
+                f"https://finance.yahoo.com/quote/{sel_ticker}/news",
+                use_container_width=True)
+
+            st.divider()
+            if st.button("🗑️ Quitar de watchlist",
+                         type="secondary",
+                         use_container_width=True,
+                         key=f"del_{sel_ticker}"):
+                if watchlist_remove(sel_ticker):
+                    st.success(f"❌ {sel_ticker} eliminado")
+                    st.session_state.pop("wl_data", None)
+                    st.rerun()
+
+
 # ╔═══════════════════════════════════════════════════════════════╗
 # ║  ANÁLISIS INDIVIDUAL                                          ║
 # ╚═══════════════════════════════════════════════════════════════╝
@@ -1749,6 +2374,25 @@ elif pagina == "📈 Análisis Individual":
         tab       = st.radio("Vista", ["🔧 Técnico","📋 Fundamental","🔧+📋 Completo"])
         st.divider()
         go_btn    = st.button("🚀 Analizar", type="primary", use_container_width=True)
+
+        # Botón añadir a watchlist
+        if GSPREAD_AVAILABLE and ticker_in:
+            if st.button(f"⭐ Seguir {ticker_in.upper().strip()}",
+                          use_container_width=True, key="wl_ai_btn"):
+                t_clean = ticker_in.upper().strip()
+                try:
+                    h_t, _ = descargar(t_clean, "5d")
+                    if not h_t.empty:
+                        precio_inicial = float(h_t["Close"].iloc[-1])
+                        nota = "Añadido desde Análisis Individual"
+                        if watchlist_add(t_clean, precio_inicial, nota):
+                            st.success(f"✅ {t_clean} añadido a watchlist")
+                        else:
+                            st.info(f"ℹ️ {t_clean} ya estaba en watchlist")
+                    else:
+                        st.error(f"No se pudo obtener precio de {t_clean}")
+                except Exception as e:
+                    st.error(f"Error: {e}")
 
     if go_btn and ticker_in:
         ticker_in = ticker_in.upper().strip()
