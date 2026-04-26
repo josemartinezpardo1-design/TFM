@@ -528,19 +528,49 @@ def mf(nombre, val, fmt, bueno, malo):
 # ╔═══════════════════════════════════════════════════════════════╗
 # ║  SCREENER — TICKERS & SCORING                                ║
 # ╚═══════════════════════════════════════════════════════════════╝
+SP500_TICKERS = [
+    "MMM","AOS","ABT","ABBV","ACN","ADBE","AMD","AES","AFL","A","APD","ABNB","AKAM","ALB",
+    "ARE","ALGN","ALLE","LNT","ALL","GOOGL","GOOG","MO","AMZN","AMCR","AEE","AAL","AEP",
+    "AXP","AIG","AMT","AWK","AMP","AME","AMGN","APH","ADI","ANSS","AON","APA","APO","AAPL",
+    "AMAT","APTV","ACGL","ADM","ANET","AJG","AIZ","T","ATO","ADSK","ADP","AZO","AVB","AVY",
+    "AXON","BKR","BALL","BAC","BAX","BDX","BRK-B","BBY","TECH","BIIB","BLK","BX","BK",
+    "BA","BKNG","BSX","BMY","AVGO","BR","BRO","BF-B","BLDR","BG","BXP","CHRW","CDNS","CZR",
+    "CPT","CPB","COF","CAH","KMX","CCL","CARR","CAT","CBOE","CBRE","CDW","CE","COR","CNC",
+    "CNP","CF","CRL","SCHW","CHTR","CVX","CMG","CB","CHD","CI","CINF","CTAS","CSCO","C",
+    "CFG","CLX","CME","CMS","KO","CTSH","COIN","CL","CMCSA","CAG","COP","ED","STZ","CEG",
+    "COO","CPRT","GLW","CPAY","CTVA","CSGP","COST","CTRA","CRWD","CCI","CSX","CMI","CVS",
+    "DHR","DRI","DVA","DAY","DECK","DE","DELL","DAL","DVN","DXCM","FANG","DLR","DG","DLTR",
+    "D","DPZ","DASH","DOV","DOW","DHI","DTE","DUK","DD","EMN","ETN","EBAY","ECL","EIX",
+    "EW","EA","ELV","EMR","ENPH","ETR","EOG","EPAM","EQT","EFX","EQIX","EQR","ERIE","ESS",
+    "EL","EG","EVRG","ES","EXC","EXE","EXPE","EXPD","EXR","XOM","FFIV","FDS","FICO","FAST",
+    "FRT","FDX","FIS","FITB","FSLR","FE","FI","F","FTNT","FTV","FOXA","FOX","BEN","FCX",
+    "GRMN","IT","GE","GEHC","GEV","GEN","GNRC","GD","GIS","GM","GPC","GILD","GPN","GL",
+    "GDDY","GS","HAL","HIG","HAS","HCA","DOC","HSIC","HSY","HES","HPE","HLT","HOLX","HD",
+    "HON","HRL","HST","HWM","HPQ","HUBB","HUM","HBAN","HII","IBM","IEX","IDXX","ITW","INCY",
+    "IR","PODD","INTC","ICE","IFF","IP","IPG","INTU","ISRG","IVZ","INVH","IQV","IRM","JBHT",
+    "JBL","JKHY","J","JNJ","JCI","JPM","K","KVUE","KDP","KEY","KEYS","KMB","KIM","KMI",
+    "KKR","KLAC","KHC","KR","LHX","LH","LRCX","LW","LVS","LDOS","LEN","LLY","LIN","LYV",
+    "LKQ","LMT","L","LOW","LULU","LYB","MTB","MPC","MKTX","MAR","MMC","MLM","MAS","MA",
+    "MCD","MCK","MDT","MRK","META","MET","MTD","MGM","MCHP","MU","MSFT","MAA","MRNA","MHK",
+    "MOH","TAP","MDLZ","MPWR","MNST","MCO","MS","MOS","MSI","MSCI","NDAQ","NTAP","NFLX",
+    "NEM","NWSA","NWS","NEE","NKE","NI","NDSN","NSC","NTRS","NOC","NCLH","NRG","NUE","NVDA",
+    "NVR","NXPI","ORLY","OXY","ODFL","OMC","ON","OKE","ORCL","OTIS","PCAR","PKG","PLTR",
+    "PANW","PARA","PH","PAYX","PAYC","PYPL","PNR","PEP","PFE","PCG","PM","PSX","PNW","PNC",
+    "POOL","PPG","PPL","PFG","PG","PGR","PLD","PRU","PEG","PTC","PSA","PHM","PWR","QCOM",
+    "DGX","RL","RJF","RTX","O","REG","REGN","RF","RSG","RMD","RVTY","ROK","ROL","ROP","ROST",
+    "RCL","SPGI","CRM","SBAC","SLB","STX","SRE","NOW","SHW","SPG","SWKS","SJM","SW","SNA",
+    "SOLV","SO","LUV","SWK","SBUX","STT","STLD","STE","SYK","SMCI","SYF","SNPS","SYY","TMUS",
+    "TROW","TTWO","TPR","TRGP","TGT","TEL","TDY","TFX","TER","TSLA","TXN","TPL","TXT","TMO",
+    "TJX","TKO","TSCO","TT","TDG","TRV","TRMB","TFC","TYL","TSN","USB","UBER","UDR","ULTA",
+    "UNP","UAL","UPS","URI","UNH","UHS","VLO","VTR","VLTO","VRSN","VRSK","VZ","VRTX","VTRS",
+    "VICI","V","VST","VMC","WRB","GWW","WAB","WBA","WMT","DIS","WBD","WM","WAT","WEC","WFC",
+    "WELL","WST","WDC","WY","WSM","WMB","WTW","WDAY","WYNN","XEL","XYL","YUM","ZBRA","ZBH","ZTS"
+]
+
 @st.cache_data(ttl=86400)
 def get_sp500():
-    try:
-        html = requests.get("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
-                            headers={"User-Agent": "Mozilla/5.0"}, timeout=10).text
-        t = pd.read_html(html)
-        return [x.replace(".", "-") for x in t[0]["Symbol"].tolist()]
-    except Exception:
-        return ["AAPL","MSFT","GOOGL","AMZN","NVDA","META","TSLA","BRK-B","JPM","V",
-                "JNJ","UNH","PG","MA","HD","DIS","NFLX","PFE","KO","PEP","MRK","ABBV",
-                "AVGO","COST","WMT","CSCO","TMO","ABT","CRM","ACN","NKE","MCD","LLY",
-                "DHR","TXN","QCOM","INTC","AMGN","PM","UPS","MS","GS","BLK","AXP",
-                "CAT","BA","GE","IBM","MMM","CVX"]
+    """S&P 500 — lista hardcoded (~503 tickers, sin dependencia de Wikipedia)."""
+    return SP500_TICKERS
 
 @st.cache_data(ttl=86400)
 def get_ibex():
@@ -550,54 +580,116 @@ def get_ibex():
 
 @st.cache_data(ttl=86400)
 def get_dax():
-    return ["SAP.DE","SIE.DE","ALV.DE","DTE.DE","AIR.DE","MBG.DE","DHL.DE",
-            "BAS.DE","BMW.DE","IFX.DE","BEI.DE","BAYN.DE","ADS.DE","VOW3.DE",
-            "DB1.DE","RWE.DE","CON.DE","DBK.DE","MRK.DE","SHL.DE"]
+    """DAX 40 — los 40 valores del índice principal alemán."""
+    return [
+        "SAP.DE","SIE.DE","ALV.DE","DTE.DE","AIR.DE","MBG.DE","DHL.DE",
+        "BAS.DE","BMW.DE","IFX.DE","BEI.DE","BAYN.DE","ADS.DE","VOW3.DE",
+        "DB1.DE","RWE.DE","CON.DE","DBK.DE","MRK.DE","SHL.DE",
+        "MTX.DE","HEN3.DE","HEI.DE","FRE.DE","SY1.DE","ENR.DE","P911.DE",
+        "ZAL.DE","BNR.DE","CBK.DE","RHM.DE","QIA.DE","SRT3.DE","EOAN.DE",
+        "VNA.DE","HNR1.DE","PAH3.DE","FME.DE","BOSS.DE","GXI.DE"
+    ]
+
+SP400_TICKERS = [
+    "AAL","ACA","ACIW","ACM","ADC","AEIS","AFG","AGCO","ALE","ALGM","ALK","ALKS","ALV",
+    "AM","AMG","AMH","AMKR","AN","ANF","AOS","APAM","APG","APLE","APPF","ARMK","ARW",
+    "ARWR","ASB","ASGN","ASH","ATI","ATR","AVNT","AVT","AWI","AYI","AZTA","BC","BCO",
+    "BCPC","BDC","BERY","BIO","BJ","BKH","BLD","BLKB","BMI","BPOP","BRBR","BRKR","BRX",
+    "BWXT","BXMT","CAR","CBSH","CBT","CBU","CC","CCK","CDP","CELH","CFR","CGNX","CHDN",
+    "CHE","CHH","CHX","CIEN","CIVI","CLF","CMA","CMC","CNH","CNO","CNX","COHR","COKE",
+    "COLB","COLM","COOP","CPK","CR","CRC","CROX","CRS","CRUS","CSL","CW","CWAN","CWH",
+    "CWST","CXT","CYH","DAR","DBRG","DCI","DEI","DINO","DKS","DLB","DNB","DNLI","DOCS",
+    "DPZ","DRVN","DT","DTM","DV","DY","EAT","EEFT","EHC","ELS","ELY","EME","ENR","ENS",
+    "EPC","EQH","ESAB","ESI","ESNT","ETRN","EVR","EVRG","EWBC","EXEL","EXLS","EXP","EXPO",
+    "FAF","FBP","FCF","FCN","FFIN","FHB","FHI","FIVE","FIVN","FIX","FIZZ","FL","FLO",
+    "FLR","FN","FNB","FND","FOUR","FR","FRPT","FSS","FTDR","FUL","FULT","FYBR","G","GATX",
+    "GBCI","GEF","GFF","GGG","GHC","GLPI","GME","GMED","GMS","GNL","GNTX","GNW","GO",
+    "GPI","GPK","GT","GTES","GTLS","GVA","GXO","HAE","HALO","HASI","HBI","HBNC","HCC",
+    "HCSG","HE","HELE","HGV","HIW","HL","HLI","HLNE","HLT","HOG","HOMB","HP","HPP","HQY",
+    "HR","HRB","HTH","HUBG","HUN","HXL","IAC","IBKR","IBOC","ICUI","IDA","IDCC","IDYA",
+    "IIPR","ILPT","IMG","INCY","INDB","INGM","INGR","INSW","INT","IONS","IOSP","IPAR",
+    "IRDM","IRT","ITRI","IVR","IVZ","JBL","JBT","JEF","JLL","JOE","JWN","KAI","KBH","KBR",
+    "KD","KEX","KMT","KN","KNF","KNX","KRG","KRYS","KTB","KW","LAD","LAMR","LANC","LBRT",
+    "LCII","LFUS","LITE","LIVN","LKQ","LNTH","LNW","LOPE","LPX","LSCC","LSTR","M","MAN",
+    "MASI","MAT","MATX","MC","MCY","MDU","MEDP","MGY","MIDD","MMS","MOG.A","MOH","MORN",
+    "MP","MSA","MSM","MTH","MTN","MTSI","MTX","MUR","MUSA","NAVI","NBIX","NBR","NCNO",
+    "NEU","NFE","NJR","NNN","NOG","NOV","NOVT","NSA","NSP","NWE","NYT","ODFL","OFC","OGE",
+    "OGN","OGS","OHI","OII","OLED","OLLI","OLN","ONB","ONTO","ORA","ORI","OSK","OUT",
+    "OVV","OWL","OXM","PACW","PAG","PAYC","PB","PBF","PBH","PCG","PCH","PCTY","PEB","PEN",
+    "PENN","PFGC","PII","PINC","PIPR","PLNT","PNFP","PNM","PNW","POR","POST","POWI","PPC",
+    "PR","PRDO","PRGO","PRI","PRMW","PRSP","PRVA","PSN","PVH","QLYS","R","RBA","RBC","RDN",
+    "RDNT","REVG","REZI","RGA","RGEN","RGLD","RH","RIG","RIVN","RKT","RLI","RMBS","RNR",
+    "ROAD","ROIV","ROL","RPM","RRC","RRX","RXO","RYAN","RYN","SAIA","SAIC","SAM","SBH",
+    "SBNY","SCI","SCSC","SEE","SEIC","SF","SFM","SFNC","SGRY","SIGI","SITC","SITE","SJM",
+    "SKT","SKX","SKY","SKYW","SLAB","SLG","SLGN","SM","SMG","SMP","SNA","SNDR","SNV",
+    "SNX","SON","SPB","SPSC","SR","SRCL","SSB","SSD","ST","STAG","STC","STE","STER","STL",
+    "STRA","STWD","SUI","SWX","SXT","TCBI","TCN","TDC","TDS","TEX","TFII","TGNA","THC",
+    "THG","THO","THS","TKR","TMHC","TNDM","TNL","TPL","TPR","TPX","TR","TRMB","TRNO",
+    "TRTX","TWO","TXNM","TXRH","UAA","UCBI","UE","UFPI","UGI","UHS","UNF","UNFI","UNM",
+    "UNVR","URBN","USFD","USNA","UTL","UTZ","UVV","VAC","VC","VFC","VLY","VNT","VOYA",
+    "VSCO","VSH","VSTS","VVI","VVV","WAB","WAFD","WBS","WCC","WD","WEN","WERN","WEX",
+    "WFRD","WH","WHR","WLY","WMS","WOLF","WOR","WPC","WSC","WSM","WSO","WST","WTRG",
+    "WTS","WTTR","WWD","WWE","X","XHR","XPO","XRAY","Y","YELP","ZD","ZIP"
+]
 
 @st.cache_data(ttl=86400)
 def get_sp400():
-    try:
-        html = requests.get("https://en.wikipedia.org/wiki/List_of_S%26P_400_companies",
-                            headers={"User-Agent": "Mozilla/5.0"}, timeout=10).text
-        t = pd.read_html(html)
-        for df in t:
-            for col in df.columns:
-                if "symbol" in str(col).lower() or "ticker" in str(col).lower():
-                    return [x.replace(".", "-") for x in df[col].dropna().astype(str).tolist()]
-    except Exception:
-        pass
-    return ["MUSA","SLGN","HLI","CVCO","UBSI","HOMB","WSFS","INDB","SFNC","FFIN"]
+    """S&P 400 MidCap — lista hardcoded ~300 tickers (sin dependencia de Wikipedia)."""
+    return SP400_TICKERS
+
+SP600_TICKERS = [
+    "AAOI","AAP","ABCB","ABG","ABM","ACA","ACEL","ACIW","ACLS","ACMR","ACVA","ADUS","AEIS",
+    "AESI","AGM","AGO","AGYS","AHCO","AHH","AIN","AIR","AKR","AL","ALEX","ALG","ALGT","ALKS",
+    "ALRM","ALX","AMBA","AMC","AMN","AMR","AMRC","AMSF","AMWD","AMWL","ANDE","ANET","ANIK",
+    "ANIP","AORT","AOS","AOSL","APAM","APLE","APOG","APPN","ARCB","ARCH","ARCT","ARI","ARIS",
+    "ARLO","ARLP","AROC","ARQT","ARR","ARTNA","ARVN","ASIX","ASO","ASTE","ASTH","ATEN","ATGE",
+    "ATI","ATKR","ATNI","ATSG","AUB","AVA","AVAV","AVNS","AVNW","AWR","AX","AXL","AZZ","B",
+    "BANC","BANF","BANR","BBSI","BCC","BCRX","BDC","BFH","BFS","BGS","BHE","BHF","BHLB","BIG",
+    "BIPC","BJRI","BKE","BKU","BL","BLBD","BLMN","BLX","BMRC","BNL","BOH","BOOT","BOX","BPMC",
+    "BRC","BRY","BTU","BV","BVH","BXC","BXMT","BY","BYD","CABO","CAKE","CAL","CALX","CARG",
+    "CARS","CASH","CATO","CATY","CBL","CBRL","CBT","CBU","CBZ","CCO","CCOI","CCRN","CCS",
+    "CDE","CDP","CECO","CENT","CENTA","CENX","CERS","CEVA","CFFN","CHCO","CHCT","CHEF","CHGG",
+    "CIVB","CKH","CLB","CLDX","CLW","CNDT","CNK","CNMD","CNO","CNS","CNX","COCO","COHU",
+    "COKE","COLB","COLL","COLM","COMM","COOP","CORT","CPF","CPG","CPK","CPRX","CPS","CRC",
+    "CRGY","CRI","CRK","CRMT","CRSR","CRUS","CSGS","CSV","CTBI","CTRE","CTS","CUBI","CURO",
+    "CVBF","CVCO","CVI","CWAN","CWEN","CWH","CWK","CWST","CWT","CXT","CXW","CYH","DAN",
+    "DCO","DDD","DDS","DEA","DEI","DENN","DFH","DFIN","DGII","DHC","DIN","DIOD","DJCO","DK",
+    "DLX","DNUT","DOCN","DOLE","DORM","DRH","DRQ","DSGX","DV","DXC","DXPE","DY","DZSI",
+    "EAT","EBC","EBS","ECPG","EE","EEX","EFC","EGBN","EGY","EIG","ELME","ENR","ENS","ENV",
+    "ENVA","EOLS","EPAC","EPC","EPM","EPRT","EQC","ERII","ESE","ETD","EVH","EVTC","EXLS",
+    "EXPI","EXPO","EXTR","FBK","FBNC","FBP","FBRT","FCF","FCFS","FCN","FCPT","FELE","FF",
+    "FFBC","FFIN","FFIV","FG","FHB","FHI","FIBK","FISI","FIVN","FIZZ","FL","FLGT","FLNG",
+    "FLO","FLR","FLWS","FMBH","FN","FNB","FNKO","FOLD","FORM","FORR","FOXF","FRBA","FRD",
+    "FRG","FRME","FRO","FSP","FSS","FTDR","FUL","FUN","FWRD","FWRG","G","GATX","GBL","GBX",
+    "GCI","GCMG","GDEN","GDOT","GEF","GEO","GES","GHC","GIII","GLNG","GMS","GMRE","GNTY",
+    "GNW","GO","GOGO","GOLF","GOOS","GPI","GPK","GPRE","GRBK","GSL","GTLS","GTN","GTY",
+    "GVA","HAE","HAFC","HAIN","HALO","HASI","HBCP","HBI","HBT","HCC","HCKT","HCSG","HCTI",
+    "HEES","HELE","HFWA","HGV","HI","HIBB","HL","HLF","HLIT","HLX","HMN","HOG","HOLX",
+    "HOMB","HONE","HOPE","HOV","HP","HPK","HPP","HQY","HR","HRB","HRMY","HRTG","HSC",
+    "HTBI","HTBK","HTH","HTLD","HTZ","HUBG","HUN","HURN","HVT","HWC","HWKN","HY","I",
+    "ICHR","ICUI","IDCC","IDT","IDYA","IIPR","INDB","INGM","INGR","INMD","INSW","INT","INVA"
+]
 
 @st.cache_data(ttl=86400)
 def get_sp600():
-    try:
-        html = requests.get("https://en.wikipedia.org/wiki/List_of_S%26P_600_companies",
-                            headers={"User-Agent": "Mozilla/5.0"}, timeout=10).text
-        t = pd.read_html(html)
-        for df in t:
-            for col in df.columns:
-                if "symbol" in str(col).lower() or "ticker" in str(col).lower():
-                    return [x.replace(".", "-") for x in df[col].dropna().astype(str).tolist()]
-    except Exception:
-        pass
-    return ["ACVA","AMBA","CENT","CEVA","DIOD","DORM","IOSP","KALU","MGEE","NBTB"]
+    """S&P 600 SmallCap — lista hardcoded ~360 tickers (sin dependencia de Wikipedia)."""
+    return SP600_TICKERS
 
 @st.cache_data(ttl=86400)
 def get_nasdaq100():
-    try:
-        html = requests.get("https://en.wikipedia.org/wiki/Nasdaq-100",
-                            headers={"User-Agent": "Mozilla/5.0"}, timeout=10).text
-        t = pd.read_html(html)
-        for df in t:
-            for col in df.columns:
-                if "ticker" in str(col).lower() or "symbol" in str(col).lower():
-                    tks = df[col].dropna().astype(str).tolist()
-                    if len(tks) > 50:
-                        return [x.replace(".", "-") for x in tks]
-    except Exception:
-        pass
-    return ["AAPL","MSFT","NVDA","GOOGL","META","AMZN","TSLA","AVGO","COST","NFLX",
-            "AMD","QCOM","INTU","AMAT","ISRG","ADI","MU","LRCX","KLAC","SNPS"]
+    """Nasdaq 100 — 100 mayores empresas no-financieras del Nasdaq."""
+    return [
+        "AAPL","MSFT","NVDA","GOOGL","GOOG","AMZN","META","AVGO","TSLA","COST",
+        "NFLX","ADBE","PEP","CSCO","TMUS","INTC","CMCSA","TXN","QCOM","AMD",
+        "AMAT","INTU","HON","BKNG","ISRG","SBUX","ADP","LRCX","GILD","MDLZ",
+        "REGN","VRTX","ADI","KLAC","PANW","SNPS","CDNS","MRVL","CRWD","ORLY",
+        "CSX","ASML","ABNB","FTNT","CTAS","WDAY","ROP","CHTR","NXPI","ADSK",
+        "AEP","PCAR","FANG","PYPL","ROST","MNST","KDP","CPRT","XEL","FAST",
+        "ODFL","BKR","DDOG","TEAM","EA","KHC","CTSH","DXCM","EXC","VRSK",
+        "CCEP","IDXX","BIIB","CSGP","ON","ZS","CDW","ANSS","MDB","ILMN",
+        "TTD","MCHP","GFS","WBD","TTWO","ENPH","DLTR","WBA","GEHC","SIRI",
+        "PDD","LULU","MAR","ALGN","SMCI","ARM","LIN","SBNY","DASH","MELI"
+    ]
 
 @st.cache_data(ttl=86400)
 def get_cac40():
@@ -619,53 +711,84 @@ def get_eurostoxx50():
 
 @st.cache_data(ttl=86400)
 def get_ftse100():
-    return ["AZN.L","SHEL.L","HSBA.L","ULVR.L","BP.L","RIO.L","GSK.L","REL.L",
-            "NG.L","LSEG.L","BATS.L","DGE.L","CPG.L","RKT.L","VOD.L","LLOY.L",
-            "BARC.L","NWG.L","STAN.L","ABF.L","IHG.L","WTB.L","LAND.L","SBRY.L",
-            "TSCO.L","MKS.L","JD.L","EZJ.L","IAG.L","RR.L","BA.L","WEIR.L",
-            "HLMA.L","SDR.L","CRDA.L","MNDI.L","SMDS.L","EXPN.L","SAGE.L","AUTO.L",
-            "SPX.L","SMIN.L","IMB.L","GLEN.L","BHP.L","AAL.L","ANTO.L","CNA.L",
-            "SVT.L","UU.L","SSE.L","PNN.L","NXT.L","OCDO.L","HWDN.L","MRO.L"]
+    """FTSE 100 — los 100 valores principales de la Bolsa de Londres."""
+    return [
+        "AZN.L","SHEL.L","HSBA.L","ULVR.L","BP.L","RIO.L","GSK.L","REL.L",
+        "NG.L","LSEG.L","BATS.L","DGE.L","CPG.L","RKT.L","VOD.L","LLOY.L",
+        "BARC.L","NWG.L","STAN.L","ABF.L","IHG.L","WTB.L","LAND.L","SBRY.L",
+        "TSCO.L","MKS.L","JD.L","EZJ.L","IAG.L","RR.L","BA.L","WEIR.L",
+        "HLMA.L","SDR.L","CRDA.L","MNDI.L","SMDS.L","EXPN.L","SAGE.L","AUTO.L",
+        "SPX.L","SMIN.L","IMB.L","GLEN.L","BHP.L","AAL.L","ANTO.L","CNA.L",
+        "SVT.L","UU.L","SSE.L","PNN.L","NXT.L","OCDO.L","HWDN.L","MRO.L",
+        "ADM.L","AHT.L","ANG.L","ARCM.L","AVST.L","AVV.L","BEZ.L","BNZL.L",
+        "BRBY.L","BT-A.L","CCH.L","CTEC.L","DCC.L","DPLM.L","ENT.L","FCIT.L",
+        "FRAS.L","FRES.L","HIK.L","HL.L","HSX.L","ICP.L","III.L","IMI.L",
+        "INF.L","ITRK.L","KGF.L","LGEN.L","LMP.L","MNG.L","MRON.L","NMC.L",
+        "PHNX.L","PRU.L","PSON.L","RTO.L","SGE.L","SGRO.L","SHB.L","SKG.L",
+        "SLA.L","SN.L","STJ.L","TW.L","UTG.L","VTY.L","WG.L","WIZZ.L"
+    ]
 
 @st.cache_data(ttl=86400)
 def get_spi():
-    """Swiss Performance Index — principales valores del SIX Swiss Exchange."""
-    return ["NESN.SW","ROG.SW","NOVN.SW","ALC.SW","UHR.SW","CFR.SW","ZURN.SW",
-            "ABBN.SW","GIVN.SW","LOGN.SW","SIKA.SW","GEBN.SW","LONN.SW","LHN.SW",
-            "BUCN.SW","CSGN.SW","UBSG.SW","BRKN.SW","PGHN.SW","BARN.SW","SLHN.SW",
-            "VACN.SW","SREN.SW","BAER.SW","COTN.SW","TEMN.SW","DKSH.SW","SOFN.SW",
-            "ARBN.SW","LISN.SW","SCMN.SW","MBTN.SW","EMMN.SW","HELN.SW","KARN.SW",
-            "BCGE.SW","BCVN.SW","BKW.SW","BOBN.SW","CAG.SW","CLAN.SW","COHN.SW",
-            "DLKN.SW","EMSN.SW","FHZN.SW","HIAG.SW","HUBN.SW","INRN.SW","JOEL.SW",
-            "KNIN.SW","LAHN.SW","MCHN.SW","MOBN.SW","NBEN.SW","OBDC.SW","PEAN.SW"]
+    """Swiss Performance Index — ~120 valores principales del SIX Swiss Exchange."""
+    return [
+        "NESN.SW","ROG.SW","NOVN.SW","ALC.SW","UHR.SW","CFR.SW","ZURN.SW",
+        "ABBN.SW","GIVN.SW","LOGN.SW","SIKA.SW","GEBN.SW","LONN.SW","LHN.SW",
+        "UBSG.SW","BRKN.SW","PGHN.SW","BARN.SW","SLHN.SW","SREN.SW","BAER.SW",
+        "COTN.SW","TEMN.SW","DKSH.SW","SOFN.SW","ARBN.SW","LISN.SW","SCMN.SW",
+        "MBTN.SW","EMMN.SW","HELN.SW","KARN.SW","BCGE.SW","BCVN.SW","BKW.SW",
+        "BOBN.SW","CAG.SW","CLAN.SW","COHN.SW","DLKN.SW","EMSN.SW","FHZN.SW",
+        "HIAG.SW","HUBN.SW","INRN.SW","JOEL.SW","KNIN.SW","LAHN.SW","MCHN.SW",
+        "MOBN.SW","NBEN.SW","OBDC.SW","PEAN.SW","BUCN.SW","VACN.SW","ADEN.SW",
+        "ALSN.SW","BANB.SW","BBN.SW","BCJ.SW","BELL.SW","BION.SW","BLKB.SW",
+        "BNR.SW","BSKP.SW","BURY.SW","BVZN.SW","CALN.SW","CFT.SW","COPN.SW",
+        "CPHN.SW","DAE.SW","DESN.SW","EFGN.SW","FORN.SW","FREN.SW","FTON.SW",
+        "GALD.SW","GAM.SW","GLKBN.SW","GMI.SW","GURN.SW","HBLN.SW","HOCN.SW",
+        "IFCN.SW","IMPN.SW","KOMN.SW","KUD.SW","LEHN.SW","LEMN.SW","LIND.SW",
+        "LLBN.SW","MEDX.SW","METN.SW","MTG.SW","NWRN.SW","ORON.SW","OERL.SW",
+        "PEHN.SW","PMN.SW","PNRG.SW","PRE.SW","PSPN.SW","RIEN.SW","ROBN.SW",
+        "RSGN.SW","SAHN.SW","SCHP.SW","SENS.SW","SFPN.SW","SFZN.SW","SGSN.SW",
+        "SIGN.SW","SLOG.SW","SOON.SW","SPSN.SW","STMN.SW","SUN.SW","SUNE.SW",
+        "TIBN.SW","TIT.SW","UBXN.SW","VAHN.SW","VATN.SW","VBSN.SW","VPBN.SW",
+        "VZN.SW","WAR.SW","WIHN.SW","ZEHN.SW","ZUGER.SW","ZWM.SW"
+    ]
 
 @st.cache_data(ttl=86400)
 def get_nikkei225():
-    """Nikkei 225 — principales valores de la Bolsa de Tokio."""
-    return ["7203.T","9984.T","6861.T","8306.T","6758.T","6501.T","7267.T",
-            "9432.T","8316.T","6702.T","4063.T","9433.T","7751.T","8035.T",
-            "6954.T","4661.T","2914.T","9022.T","7832.T","4519.T","6367.T",
-            "8031.T","6098.T","7011.T","5401.T","4503.T","9021.T","8411.T",
-            "3382.T","2802.T","4452.T","6471.T","9531.T","5108.T","8801.T",
-            "1925.T","9201.T","9101.T","7733.T","6146.T","4568.T","4901.T",
-            "8802.T","3407.T","5713.T","7741.T","6645.T","4523.T","8309.T","6302.T"]
+    """Nikkei 225 — los 225 valores principales de la Bolsa de Tokio."""
+    return [
+        "7203.T","9984.T","6861.T","8306.T","6758.T","6501.T","7267.T","9432.T","8316.T",
+        "6702.T","4063.T","9433.T","7751.T","8035.T","6954.T","4661.T","2914.T","9022.T",
+        "7832.T","4519.T","6367.T","8031.T","6098.T","7011.T","5401.T","4503.T","9021.T",
+        "8411.T","3382.T","2802.T","4452.T","6471.T","9531.T","5108.T","8801.T","1925.T",
+        "9201.T","9101.T","7733.T","6146.T","4568.T","4901.T","8802.T","3407.T","5713.T",
+        "7741.T","6645.T","4523.T","8309.T","6302.T","8053.T","7269.T","6326.T","8001.T",
+        "6273.T","9020.T","6981.T","6594.T","6920.T","8766.T","7270.T","6724.T","6752.T",
+        "8830.T","6586.T","9613.T","9434.T","4502.T","4543.T","6301.T","8267.T","9009.T",
+        "9301.T","9303.T","9532.T","9602.T","9735.T","9766.T","9983.T","2502.T","2503.T",
+        "2531.T","2768.T","2801.T","2871.T","2897.T","3086.T","3092.T","3099.T","3101.T",
+        "3401.T","3402.T","3405.T","3436.T","3863.T","3865.T","4004.T","4005.T","4021.T",
+        "4042.T","4043.T","4061.T","4151.T","4183.T","4188.T","4208.T","4324.T","4385.T",
+        "4507.T","4516.T","4528.T","4536.T","4540.T","4544.T","4549.T","4555.T","4631.T",
+        "4689.T","4704.T","4751.T","4755.T","4768.T","4901.T","4902.T","4911.T","5019.T",
+        "5020.T","5101.T","5201.T","5214.T","5232.T","5233.T","5301.T","5332.T","5333.T",
+        "5406.T","5411.T","5541.T","5631.T","5703.T","5706.T","5707.T","5711.T","5714.T",
+        "5801.T","5802.T","5803.T","5901.T","5938.T","5942.T","5947.T","6098.T","6103.T",
+        "6113.T","6178.T","6305.T","6315.T","6361.T","6366.T","6471.T","6472.T","6473.T",
+        "6479.T","6504.T","6506.T","6645.T","6701.T","6724.T","6753.T","6770.T","6841.T",
+        "6857.T","6902.T","6952.T","6963.T","6971.T","6976.T","7003.T","7004.T","7012.T",
+        "7186.T","7202.T","7211.T","7261.T","7272.T","7731.T","7735.T","7762.T","7911.T",
+        "7912.T","7951.T","7974.T","8001.T","8002.T","8015.T","8028.T","8233.T","8252.T",
+        "8253.T","8270.T","8303.T","8331.T","8354.T","8355.T","8410.T","8628.T","8630.T",
+        "8697.T","8725.T","8729.T","8750.T","8795.T","8804.T","9007.T","9008.T","9602.T",
+        "9613.T","9706.T","9831.T","9989.T","9986.T"
+    ]
 
 @st.cache_data(ttl=86400)
 def get_russell1000():
-    try:
-        url = "https://en.wikipedia.org/wiki/Russell_1000_Index"
-        html = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10).text
-        t = pd.read_html(html)
-        for df in t:
-            for col in df.columns:
-                if "ticker" in str(col).lower() or "symbol" in str(col).lower():
-                    tks = df[col].dropna().astype(str).tolist()
-                    if len(tks) > 100:
-                        return [x.replace(".", "-") for x in tks]
-    except Exception:
-        pass
-    # Fallback: S&P 500 como proxy
-    return get_sp500()
+    """Russell 1000 — aproximación con S&P 500 + S&P 400 (las 900 mayores US)."""
+    universe = list(dict.fromkeys(SP500_TICKERS + SP400_TICKERS))
+    return universe
 
 INDICES = {
     "SP500":      ("🇺🇸 S&P 500",         get_sp500),
@@ -1355,12 +1478,14 @@ elif pagina == "🔎 Descubrimiento":
             st.warning("Selecciona al menos un tipo de anomalía.")
             st.stop()
 
-        # 1. Construir universo
+        # 1. Construir universo con diagnóstico por índice
         with st.spinner("📋 Construyendo universo de tickers..."):
             universo_raw = []
+            indices_breakdown = []
             for idx_key in indices_sel:
-                fn = INDICES[idx_key][1]
+                nombre, fn = INDICES[idx_key]
                 tks = fn()
+                indices_breakdown.append(f"{nombre}: **{len(tks)}**")
                 universo_raw.extend(tks)
 
             universo_raw = list(dict.fromkeys(universo_raw))  # deduplicar
@@ -1373,9 +1498,12 @@ elif pagina == "🔎 Descubrimiento":
             # Limitar al máximo seleccionado
             universo = universo[:n_activos]
 
-        st.info(f"🌐 Universo: **{len(universo_raw)} tickers** en índices seleccionados "
-                f"→ **{len(universo)} a analizar** "
-                f"({'excl. megacaps' if excluir_conocidos else 'incl. megacaps'})")
+        st.info(
+            f"🌐 **Universo construido:** " + " · ".join(indices_breakdown) + "  \n"
+            f"Total únicos: **{len(universo_raw)}** "
+            f"→ **{len(universo)} a analizar** "
+            f"({'excl. megacaps S&P 100' if excluir_conocidos else 'incl. megacaps'})"
+        )
 
         # 2. SPY como referencia
         spy_chg_d = None
@@ -1415,7 +1543,6 @@ elif pagina == "🔎 Descubrimiento":
                 raw = yf.download(
                     batch, period="6mo",
                     auto_adjust=True, progress=False,
-                    group_by="ticker"
                 )
                 if raw.empty:
                     n_err_d += len(batch)
@@ -1423,21 +1550,34 @@ elif pagina == "🔎 Descubrimiento":
 
                 for t in batch:
                     try:
-                        if isinstance(raw.columns, pd.MultiIndex):
-                            if t in raw.columns.get_level_values(0):
-                                all_closes[t]  = raw[t]["Close"].dropna()
-                                all_volumes[t] = raw[t]["Volume"].dropna()
-                                all_opens[t]   = raw[t]["Open"].dropna()
+                        if len(batch) == 1:
+                            # Un solo ticker — columnas planas
+                            c = raw["Close"].dropna() if "Close" in raw.columns else pd.Series(dtype=float)
+                            v = raw["Volume"].dropna() if "Volume" in raw.columns else pd.Series(dtype=float)
+                            o = raw["Open"].dropna()  if "Open"  in raw.columns else c
                         else:
-                            if len(batch) == 1:
-                                all_closes[t]  = raw["Close"].dropna()
-                                all_volumes[t] = raw["Volume"].dropna()
-                                all_opens[t]   = raw["Open"].dropna()
+                            # Múltiples tickers — MultiIndex (field, ticker)
+                            if isinstance(raw.columns, pd.MultiIndex):
+                                tickers_available = raw.columns.get_level_values(1).unique()
+                                if t not in tickers_available:
+                                    continue
+                                c = raw["Close"][t].dropna()
+                                v = raw["Volume"][t].dropna()
+                                o = raw["Open"][t].dropna()
+                            else:
+                                continue
+
+                        if len(c) >= 30:
+                            all_closes[t]  = c
+                            all_volumes[t] = v
+                            all_opens[t]   = o
+                        else:
+                            n_err_d += 1
                     except Exception:
                         n_err_d += 1
-            except Exception:
+            except Exception as e_batch:
                 n_err_d += len(batch)
-            time.sleep(0.5)
+            time.sleep(0.3)
 
         prog_bar.progress(65, text="Detectando anomalías...")
 
