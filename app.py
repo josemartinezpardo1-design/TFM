@@ -147,6 +147,27 @@ def descargar(ticker: str, period: str = "1y"):
                 pass
             time.sleep(1)
 
+    # ── 2b. Precios: FMP (segundo fallback) ──────────────────────
+    if hist.empty and FMP_KEY:
+        try:
+            url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{ticker}?timeseries={days}&apikey={FMP_KEY}"
+            r = requests.get(url, timeout=15)
+            if r.status_code == 200:
+                data = r.json()
+                hist_data = data.get("historical", []) if isinstance(data, dict) else []
+                if hist_data:
+                    df = pd.DataFrame(hist_data)
+                    df["date"] = pd.to_datetime(df["date"])
+                    df = df.sort_values("date").set_index("date")
+                    hist = df.rename(columns={
+                        "open": "Open", "high": "High", "low": "Low",
+                        "close": "Close", "volume": "Volume"
+                    })[["Open","High","Low","Close","Volume"]]
+                    hist.index.name = "Date"
+                    info["_source_prices"] = "FMP"
+        except Exception:
+            pass
+
     # ── 3. Info: Finnhub ─────────────────────────────────────────
     if fh_client:
         try:
@@ -830,49 +851,70 @@ WATCHLIST_TAB      = "watchlist"
 WATCHLIST_COLS     = ["fecha_anadido", "ticker", "precio_inicial", "nota"]
 
 
-def _get_precio_actual(ticker):
-    """Obtiene precio actual de un ticker probando varias fuentes."""
+@st.cache_data(ttl=300)
+def _fetch_historico(ticker, period="5d"):
+    """Helper robusto: devuelve DataFrame histórico probando múltiples fuentes.
+    Retorna (df, error_msg). df vacío si todo falla.
+    Cacheado 5 min para evitar peticiones redundantes en el mismo turn."""
     ticker = ticker.strip().upper()
+    errors = []
 
-    # 1. Intentar yfinance directamente con period 5d
+    # 1. yf.Ticker.history
     try:
-        import yfinance as yf
         t = yf.Ticker(ticker)
-        h = t.history(period="5d")
-        if not h.empty and "Close" in h.columns:
-            precio = float(h["Close"].iloc[-1])
-            if precio > 0:
-                return precio, None
+        h = t.history(period=period, auto_adjust=True)
+        if not h.empty and "Close" in h.columns and len(h) >= 1:
+            return h, None
+        errors.append("yf.Ticker:vacío")
     except Exception as e:
-        e1 = str(e)
-    else:
-        e1 = "vacío"
+        errors.append(f"yf.Ticker:{str(e)[:40]}")
 
-    # 2. Fallback: yfinance.download
+    # 2. yf.download
     try:
-        import yfinance as yf
-        h = yf.download(ticker, period="5d", progress=False, auto_adjust=True)
-        if not h.empty and "Close" in h.columns:
-            precio = float(h["Close"].iloc[-1])
-            if precio > 0:
-                return precio, None
+        h = yf.download(ticker, period=period, progress=False, auto_adjust=True)
+        if not h.empty and "Close" in h.columns and len(h) >= 1:
+            return h, None
+        errors.append("yf.download:vacío")
     except Exception as e:
-        e2 = str(e)
-    else:
-        e2 = "vacío"
+        errors.append(f"yf.download:{str(e)[:40]}")
 
-    # 3. Fallback: Finnhub si disponible
+    return pd.DataFrame(), " | ".join(errors)
+
+
+def _get_precio_actual(ticker):
+    """Devuelve (precio_actual, error_msg). Usa _fetch_historico internamente."""
+    h, err = _fetch_historico(ticker, "5d")
+    if h.empty:
+        # Último fallback: Finnhub
+        try:
+            if fh_client is not None:
+                quote = fh_client.quote(ticker)
+                if quote and quote.get("c", 0) > 0:
+                    return float(quote["c"]), None
+        except Exception:
+            pass
+        return None, err
     try:
-        if fh_client is not None:
-            quote = fh_client.quote(ticker)
-            if quote and quote.get("c", 0) > 0:
-                return float(quote["c"]), None
+        precio = float(h["Close"].iloc[-1])
+        return precio if precio > 0 else None, None
     except Exception as e:
-        e3 = str(e)
-    else:
-        e3 = "no disponible"
+        return None, str(e)
 
-    return None, f"yf.Ticker:{e1[:30]} | yf.download:{e2[:30]} | finnhub:{e3[:30]}"
+
+def _get_cambio_dia(ticker):
+    """Devuelve (precio_actual, cambio_pct, error). cambio_pct = % vs ayer."""
+    h, err = _fetch_historico(ticker, "5d")
+    if h.empty or len(h) < 2:
+        return None, None, err or "datos insuficientes"
+    try:
+        precio = float(h["Close"].iloc[-1])
+        ayer   = float(h["Close"].iloc[-2])
+        if precio > 0 and ayer > 0:
+            cambio = (precio / ayer - 1) * 100
+            return precio, cambio, None
+        return None, None, "precio inválido"
+    except Exception as e:
+        return None, None, str(e)
 
 
 def _get_watchlist_error():
@@ -1300,7 +1342,6 @@ with st.sidebar:
         "📈 Análisis Individual",
         "💼 Cartera",
         "📊 Macro",
-        "🤖 Research",
     ])
     st.divider()
     api_ok = f"{'✅' if fh_client else '❌'} Finnhub | {'✅' if fred_client else '❌'} FRED | ✅ yfinance | {'✅' if FMP_KEY else '❌'} FMP"
@@ -1335,20 +1376,23 @@ if pagina == "🌅 Outlook":
 
     with st.spinner("Descargando datos del mercado..."):
         market_data = {}
+        market_errors = []
         for nombre, (ticker, emoji) in market_metrics.items():
-            try:
-                h, _ = descargar(ticker, "5d")
-                if not h.empty and len(h) >= 2:
-                    precio = float(h["Close"].iloc[-1])
-                    ayer   = float(h["Close"].iloc[-2])
-                    chg    = (precio / ayer - 1) * 100
-                    market_data[nombre] = {
-                        "precio": precio,
-                        "cambio": chg,
-                        "emoji":  emoji
-                    }
-            except Exception:
-                continue
+            precio, cambio, err = _get_cambio_dia(ticker)
+            if precio is not None and cambio is not None:
+                market_data[nombre] = {
+                    "precio": precio,
+                    "cambio": cambio,
+                    "emoji":  emoji
+                }
+            else:
+                market_errors.append(f"{nombre} ({ticker}): {err}")
+
+    if not market_data:
+        st.warning(f"⚠️ No se pudieron obtener datos de mercado. {len(market_errors)} errores:")
+        with st.expander("Detalles del error"):
+            for e in market_errors[:5]:
+                st.caption(e)
 
     if market_data:
         cols_market = st.columns(len(market_data))
@@ -1384,13 +1428,9 @@ if pagina == "🌅 Outlook":
     sector_changes = []
     with st.spinner("Analizando sectores..."):
         for nombre, ticker in sector_etfs.items():
-            try:
-                h, _ = descargar(ticker, "5d")
-                if not h.empty and len(h) >= 2:
-                    chg = (float(h["Close"].iloc[-1]) / float(h["Close"].iloc[-2]) - 1) * 100
-                    sector_changes.append({"Sector": nombre, "Cambio %": round(chg, 2)})
-            except Exception:
-                continue
+            _, chg, _ = _get_cambio_dia(ticker)
+            if chg is not None:
+                sector_changes.append({"Sector": nombre, "Cambio %": round(chg, 2)})
 
     if sector_changes:
         df_sect = pd.DataFrame(sector_changes).sort_values("Cambio %", ascending=False)
@@ -2734,277 +2774,769 @@ elif pagina == "⭐ Watchlist":
 # ║  ANÁLISIS INDIVIDUAL                                          ║
 # ╚═══════════════════════════════════════════════════════════════╝
 elif pagina == "📈 Análisis Individual":
+    # ── Sidebar ────────────────────────────────────────────────────
     with st.sidebar:
-        ticker_in = st.text_input("Ticker", value="AAPL")
-        tab       = st.radio("Vista", ["🔧 Técnico","📋 Fundamental","🔧+📋 Completo"])
+        ticker_in = st.text_input("Ticker", value="AAPL",
+                                   help="Ej: AAPL, NESN.SW, 7203.T, NESN.SW")
         st.divider()
-        go_btn    = st.button("🚀 Analizar", type="primary", use_container_width=True)
+        go_btn = st.button("🚀 Analizar", type="primary", use_container_width=True)
 
-        # Botón añadir a watchlist (siempre visible)
-        if ticker_in and ticker_in.strip():
-            t_clean = ticker_in.upper().strip()
-            if st.button(f"⭐ Seguir {t_clean}",
+        if GSPREAD_AVAILABLE and ticker_in:
+            t_clean_btn = ticker_in.upper().strip()
+            if st.button(f"⭐ Seguir {t_clean_btn}",
                           use_container_width=True, key="wl_ai_btn"):
                 err = _get_watchlist_error()
                 if err:
                     st.error(f"⚠️ Watchlist no disponible: {err}")
                 else:
-                    precio_inicial, error_p = _get_precio_actual(t_clean)
+                    precio_inicial, error_p = _get_precio_actual(t_clean_btn)
                     if precio_inicial is not None:
-                        nota = "Añadido desde Análisis Individual"
-                        if watchlist_add(t_clean, precio_inicial, nota):
-                            st.success(f"✅ {t_clean} añadido a watchlist (${precio_inicial:.2f})")
+                        if watchlist_add(t_clean_btn, precio_inicial,
+                                         "Añadido desde Análisis Individual"):
+                            st.success(f"✅ {t_clean_btn} añadido (${precio_inicial:.2f})")
                         else:
-                            st.info(f"ℹ️ {t_clean} ya estaba en watchlist")
+                            st.info(f"ℹ️ {t_clean_btn} ya estaba en watchlist")
                     else:
-                        st.error(f"No se pudo obtener precio de {t_clean}")
-                        st.caption(f"Detalles: {error_p}")
+                        st.error(f"No se pudo obtener precio de {t_clean_btn}")
 
-    if go_btn and ticker_in:
-        ticker_in = ticker_in.upper().strip()
-        with st.spinner(f"Analizando {ticker_in}..."):
-            hist, info = descargar(ticker_in, "2y")
-            fin, bs, cf = descargar_financials(ticker_in)
+    # ── Inicial: pantalla de bienvenida ────────────────────────────
+    if not go_btn or not ticker_in:
+        st.header("📈 Análisis Individual de Acciones")
+        st.markdown(
+            "**Análisis 360° de cualquier ticker** — combinando análisis técnico, "
+            "fundamental, comparativa con peers y niveles operativos para que puedas "
+            "tomar una decisión informada."
+        )
 
-        if hist.empty:
-            st.error(f"Sin datos para {ticker_in}. Espera 1-2 minutos y reintenta.")
-            st.stop()
-        if len(hist) < 50:
-            st.warning(f"Solo {len(hist)} sesiones disponibles. Algunos indicadores pueden ser parciales.")
+        col_intro1, col_intro2, col_intro3, col_intro4 = st.columns(4)
+        col_intro1.markdown(
+            "<div style='background:#1e1e2e;padding:14px;border-radius:8px;text-align:center'>"
+            "<div style='font-size:24px'>📋</div>"
+            "<div style='color:#8be9fd;font-weight:bold;margin-top:4px'>Veredicto</div>"
+            "<div style='font-size:11px;color:#888;margin-top:4px'>Recomendación clara</div>"
+            "</div>", unsafe_allow_html=True)
+        col_intro2.markdown(
+            "<div style='background:#1e1e2e;padding:14px;border-radius:8px;text-align:center'>"
+            "<div style='font-size:24px'>📊</div>"
+            "<div style='color:#8be9fd;font-weight:bold;margin-top:4px'>Score 0-100</div>"
+            "<div style='font-size:11px;color:#888;margin-top:4px'>Desglose explicable</div>"
+            "</div>", unsafe_allow_html=True)
+        col_intro3.markdown(
+            "<div style='background:#1e1e2e;padding:14px;border-radius:8px;text-align:center'>"
+            "<div style='font-size:24px'>🎯</div>"
+            "<div style='color:#8be9fd;font-weight:bold;margin-top:4px'>Niveles</div>"
+            "<div style='font-size:11px;color:#888;margin-top:4px'>Entrada, stop, objetivos</div>"
+            "</div>", unsafe_allow_html=True)
+        col_intro4.markdown(
+            "<div style='background:#1e1e2e;padding:14px;border-radius:8px;text-align:center'>"
+            "<div style='font-size:24px'>🆚</div>"
+            "<div style='color:#8be9fd;font-weight:bold;margin-top:4px'>Peers</div>"
+            "<div style='font-size:11px;color:#888;margin-top:4px'>Comparativa sectorial</div>"
+            "</div>", unsafe_allow_html=True)
 
-        nombre  = info.get("longName") or info.get("shortName", ticker_in)
-        precio  = hist["Close"].iloc[-1]
-        moneda  = info.get("currency", "")
-        pais    = info.get("_fmp_country", "")
-        exch    = info.get("_fmp_exchange", "")
+        st.info("⬅️ Introduce un ticker y pulsa **🚀 Analizar**")
+        st.stop()
 
-        st.header(f"🏢 {nombre} ({ticker_in})")
-        h1, h2, h3, h4 = st.columns(4)
-        h1.metric("Precio", f"{precio:.2f} {moneda}")
-        h2.metric("Sector", info.get("sector","N/A"))
-        h3.metric("MktCap", f"${info.get('marketCap',0)/1e9:.2f}B")
-        h4.metric("País / Bolsa", f"{pais} {exch}" if pais else exch or "—")
+    # ═══════════════════════════════════════════════════════════════
+    # ANÁLISIS COMPLETO
+    # ═══════════════════════════════════════════════════════════════
+    ticker_in = ticker_in.upper().strip()
+    with st.spinner(f"Analizando {ticker_in}..."):
+        hist, info = descargar(ticker_in, "2y")
+        fin, bs, cf = descargar_financials(ticker_in)
 
-        src_p = info.get("_source_prices","Yahoo Finance")
-        src_m = info.get("_source_metrics","Yahoo Finance")
-        src_t = info.get("_source_target","Yahoo Finance")
-        st.caption(f"📡 Precios: **{src_p}** | Métricas: **{src_m}** | Target: **{src_t}**")
+    if hist.empty:
+        st.error(f"❌ Sin datos para **{ticker_in}**")
+        st.markdown("""
+        **Posibles causas:** el ticker no existe, formato incorrecto, o APIs rate-limited.
+        - Verifica en [Yahoo Finance](https://finance.yahoo.com/lookup)
+        - Espera 1-2 minutos y reintenta
+        - Pulsa **🗑️ Limpiar caché** en la barra lateral
+        """)
+        st.stop()
 
-        # ── TÉCNICO ────────────────────────────────────────────────
-        if tab in ["🔧 Técnico","🔧+📋 Completo"]:
-            st.divider()
-            st.subheader("🔧 Análisis Técnico — 7 Indicadores")
-            hist["RSI"]   = calc_rsi(hist["Close"])
-            hist["SMA_50"]  = hist["Close"].rolling(50).mean()
-            hist["SMA_200"] = hist["Close"].rolling(200).mean()
-            bu, bm, bl, bp = calc_bb(hist["Close"])
-            hist["BB_Up"] = bu; hist["BB_Mid"] = bm; hist["BB_Low"] = bl; hist["BB_PctB"] = bp
-            mc2, sg, mh = calc_macd(hist["Close"])
-            hist["MACD"] = mc2; hist["Signal"] = sg; hist["MACD_Hist"] = mh
-            hist["MACD_Hist_prev"] = mh.shift(1)
-            ax, dp, dm = calc_adx(hist)
-            hist["ADX"] = ax.values; hist["DI_Plus"] = dp.values; hist["DI_Minus"] = dm.values
-            ov, osm, ot, od = calc_obv(hist)
-            hist["OBV"] = ov; hist["OBV_SMA"] = osm
-            sk, sd = calc_stoch(hist)
-            hist["Stoch_K"] = sk; hist["Stoch_D"] = sd
-            at_v, at_p = calc_atr(hist)
-            hist["ATR_PCT"] = at_p
+    nombre  = info.get("longName") or info.get("shortName", ticker_in)
+    precio  = float(hist["Close"].iloc[-1])
+    moneda  = info.get("currency", "USD")
+    sector  = info.get("sector", "N/A")
+    mcap    = info.get("marketCap", 0)
+    pais    = info.get("_fmp_country", "")
+    exch    = info.get("_fmp_exchange", info.get("exchange", ""))
 
-            last2  = hist.iloc[-1]
-            sc, det = score_tecnico(last2, ot.iloc[-1], od.iloc[-1])
-            verd, _ = interpretar(sc)
+    # ── Cabecera con nombre y precio ──────────────────────────────
+    col_h1, col_h2, col_h3 = st.columns([3, 1, 1])
+    with col_h1:
+        st.markdown(f"## 📈 {nombre} ({ticker_in})")
+        sub = []
+        if sector != "N/A": sub.append(f"🏭 {sector}")
+        if exch:            sub.append(f"📍 {exch}")
+        if pais:            sub.append(f"🌐 {pais}")
+        if sub:
+            st.caption(" · ".join(sub))
 
-            s1, s2, s3 = st.columns([1, 2, 1])
-            s1.metric("SCORE", f"{sc}/10")
-            s2.markdown(f"### {verd}")
-            s3.caption(f"SMA200: {'✅' if precio > last2['SMA_200'] else '🔴'} | ATR%: {last2['ATR_PCT']:.2f}%")
+    with col_h2:
+        st.metric("Precio", f"{precio:,.2f} {moneda}")
 
-            for ind, d in det.items():
-                pct = d["pts"] / d["max"] if d["max"] > 0 else 0
-                ic  = "✅" if pct >= 0.7 else ("🟡" if pct >= 0.3 else "🔴")
-                st.markdown(f"{ic} **{ind}** — {d['val']} — `{d['pts']:.1f}/{d['max']:.1f}` — {d['msg']}")
+    with col_h3:
+        if mcap > 0:
+            mcap_str = (f"${mcap/1e9:,.1f}B" if mcap >= 1e9 else f"${mcap/1e6:,.0f}M")
+            st.metric("Market Cap", mcap_str)
 
-            # Niveles operativos
-            st.markdown("---")
-            st.markdown("### 🎯 Niveles Operativos")
-            nv = niveles_op(hist, info)
-            n1, n2, n3 = st.columns(3)
-            with n1:
-                st.markdown("**ENTRADAS**")
-                st.markdown(f"🟢 **Agresiva:** {nv['entrada_agresiva']:.2f}")
-                st.markdown(f"🔵 **Óptima:** {nv['entrada_optima']:.2f}")
-            with n2:
-                st.markdown("**STOP LOSS**")
-                st.markdown(f"🔴 **SL:** {nv['stop_loss']:.2f} (−{nv['riesgo_pct']:.1f}%)")
-                st.caption(f"ATR: {nv['atr']:.2f} | {nv['sl_nota']}")
-            with n3:
-                st.markdown("**TAKE PROFIT**")
-                st.markdown(f"🎯 **TP1 (2:1):** {nv['tp1']:.2f} (+{((nv['tp1']/precio-1)*100):.1f}%)")
-                st.markdown(f"🎯 **TP2 (3:1):** {nv['tp2']:.2f} (+{((nv['tp2']/precio-1)*100):.1f}%)")
-                if nv["tp3"]:
-                    st.markdown(f"🎯 **TP3:** {nv['tp3']:.2f} (+{((nv['tp3']/precio-1)*100):.1f}%)")
+    # ═══════════════════════════════════════════════════════════════
+    # CALCULAR INDICADORES Y SCORES
+    # ═══════════════════════════════════════════════════════════════
+    closes  = hist["Close"]
+    volumes = hist.get("Volume", pd.Series(dtype=float))
 
-            # Gráfico
-            n_pts = min(len(hist), 252); hg = hist.iloc[-n_pts:]
-            fig = make_subplots(rows=5, cols=1, shared_xaxes=True, vertical_spacing=0.02,
-                                row_heights=[0.35, 0.15, 0.15, 0.15, 0.15])
-            fig.add_trace(go.Scatter(x=hg.index, y=hg["Close"],  name="Precio",
-                                      line=dict(color="#f8f8f2", width=1.8)), row=1, col=1)
-            fig.add_trace(go.Scatter(x=hg.index, y=hg["SMA_50"], name="SMA50",
-                                      line=dict(color="#ffb86c", width=1, dash="dash")), row=1, col=1)
-            fig.add_trace(go.Scatter(x=hg.index, y=hg["SMA_200"],name="SMA200",
-                                      line=dict(color="#ff5555", width=1, dash="dash")), row=1, col=1)
-            fig.add_trace(go.Scatter(x=hg.index, y=hg["BB_Up"],  showlegend=False,
-                                      line=dict(color="#8be9fd", width=0.5)), row=1, col=1)
-            fig.add_trace(go.Scatter(x=hg.index, y=hg["BB_Low"], name="BB",
-                                      line=dict(color="#8be9fd", width=0.5),
-                                      fill="tonexty", fillcolor="rgba(139,233,253,0.08)"), row=1, col=1)
-            fig.add_hline(y=nv["stop_loss"], line_dash="solid", line_color="#ff5555", opacity=0.7,
-                          row=1, col=1, annotation_text=f"SL {nv['stop_loss']:.2f}",
-                          annotation_font_color="#ff5555", annotation_font_size=9)
-            fig.add_hline(y=nv["tp1"], line_dash="dot", line_color="#f1fa8c", opacity=0.6,
-                          row=1, col=1, annotation_text=f"TP1 {nv['tp1']:.2f}",
-                          annotation_font_color="#f1fa8c", annotation_font_size=9)
-            ch = ["#50fa7b" if v >= 0 else "#ff5555" for v in hg["MACD_Hist"]]
-            fig.add_trace(go.Bar(x=hg.index, y=hg["MACD_Hist"], marker_color=ch, showlegend=False), row=2, col=1)
-            fig.add_trace(go.Scatter(x=hg.index, y=hg["MACD"],  name="MACD",
-                                      line=dict(color="#50fa7b", width=1)), row=2, col=1)
-            fig.add_trace(go.Scatter(x=hg.index, y=hg["Signal"],name="Signal",
-                                      line=dict(color="#ff79c6", width=1)), row=2, col=1)
-            fig.add_trace(go.Scatter(x=hg.index, y=hg["RSI"],    name="RSI",
-                                      line=dict(color="#bd93f9", width=1)), row=3, col=1)
-            fig.add_trace(go.Scatter(x=hg.index, y=hg["Stoch_K"],name="%K",
-                                      line=dict(color="#f1fa8c", width=1, dash="dot")), row=3, col=1)
-            fig.add_hline(y=70, line_dash="dash", line_color="#ff5555", opacity=0.4, row=3, col=1)
-            fig.add_hline(y=30, line_dash="dash", line_color="#50fa7b", opacity=0.4, row=3, col=1)
-            fig.add_trace(go.Scatter(x=hg.index, y=hg["ADX"],   name="ADX",
-                                      line=dict(color="#ffb86c", width=1.4)), row=4, col=1)
-            fig.add_trace(go.Scatter(x=hg.index, y=hg["DI_Plus"],name="DI+",
-                                      line=dict(color="#50fa7b", width=0.8)), row=4, col=1)
-            fig.add_trace(go.Scatter(x=hg.index, y=hg["DI_Minus"],name="DI−",
-                                      line=dict(color="#ff5555", width=0.8)), row=4, col=1)
-            fig.add_trace(go.Scatter(x=hg.index, y=hg["OBV"],    name="OBV",
-                                      line=dict(color="#8be9fd", width=1)), row=5, col=1)
-            fig.add_trace(go.Scatter(x=hg.index, y=hg["OBV_SMA"],name="OBV SMA",
-                                      line=dict(color="#ff79c6", width=1, dash="dash")), row=5, col=1)
-            fig.update_layout(
-                title=f"{ticker_in} | Score: {sc}/10 | {verd}",
-                template="plotly_dark", paper_bgcolor="#12121f", plot_bgcolor="#1e1e2e",
-                height=1000, legend=dict(orientation="h", y=-0.02, font=dict(size=9)),
-                hovermode="x unified")
-            st.plotly_chart(fig, use_container_width=True)
-            st.caption(f"📡 Datos OHLCV: **{src_p}** | Indicadores: cálculo propio")
+    # Indicadores técnicos
+    rsi_s = calc_rsi(closes); rsi_v = float(rsi_s.iloc[-1]) if not rsi_s.empty else None
+    macd_line, macd_sig, macd_hist = calc_macd(closes)
+    macd_v = float(macd_hist.iloc[-1]) if not macd_hist.empty else None
+    bb_up, bb_mid, bb_low = calc_bb(closes)
+    bb_pct = ((precio - float(bb_low.iloc[-1])) /
+              (float(bb_up.iloc[-1]) - float(bb_low.iloc[-1])) * 100) \
+             if float(bb_up.iloc[-1]) > float(bb_low.iloc[-1]) else 50
 
-        # ── FUNDAMENTAL ────────────────────────────────────────────
-        if tab in ["📋 Fundamental","🔧+📋 Completo"]:
-            st.divider()
-            st.subheader("📋 Análisis Fundamental")
-            per = info.get("trailingPE"); pfw = info.get("forwardPE"); peg = info.get("pegRatio")
-            pb  = info.get("priceToBook"); ps  = info.get("priceToSalesTrailing12Months")
-            eve = info.get("enterpriseToEbitda")
-            gn  = calc_graham(info); fy = calc_fcf_yield(info, cf)
+    try:
+        adx_s = calc_adx(hist); adx_v = float(adx_s.iloc[-1]) if not adx_s.empty else None
+    except Exception:
+        adx_v = None
 
-            st.markdown("### 💰 Valoración")
-            st.caption(f"📡 Múltiplos: **{src_m}** | Target: **{src_t}**")
-            v1, v2, v3 = st.columns(3)
-            with v1:
-                st.markdown(mf("PER",    per, ".1f", lambda x: x < 15,  lambda x: x > 30))
-                st.markdown(mf("PER Fwd",pfw, ".1f", lambda x: x < 12,  lambda x: x > 25))
-            with v2:
-                st.markdown(mf("PEG",    peg, ".2f", lambda x: x < 1,   lambda x: x > 2))
-                st.markdown(mf("P/Book", pb,  ".2f", lambda x: x < 1.5, lambda x: x > 5))
-            with v3:
-                st.markdown(mf("P/Ventas",ps, ".2f", lambda x: x < 2,   lambda x: x > 10))
-                st.markdown(mf("EV/EBITDA",eve,".1f",lambda x: x < 10,  lambda x: x > 20))
-            if fy:
-                ic = "✅" if fy > 5 else ("🔴" if fy < 0 else "🟡")
-                st.markdown(f"{ic} **FCF Yield:** {fy:.2f}%")
-            if gn and precio:
-                dif = (precio / gn - 1) * 100
-                st.markdown(f"**Graham:** {gn:.2f} → {dif:+.1f}% — "
-                            f"{'✅ INFRAVALORADO' if precio < gn else '⚠️ SOBREVALORADO'}")
-            tm = info.get("targetMeanPrice")
-            if tm and precio:
-                up = (tm / precio - 1) * 100
-                st.markdown(f"{'✅' if up > 10 else '🟡'} **Target:** {tm:.2f} ({up:+.1f}%)")
+    try:
+        atr_s = calc_atr(hist); atr_v = float(atr_s.iloc[-1]) if not atr_s.empty else None
+    except Exception:
+        atr_v = None
 
-            st.markdown("### 📈 Rentabilidad")
-            roe = info.get("returnOnEquity"); roa = info.get("returnOnAssets")
-            pm  = info.get("profitMargins");  gm  = info.get("grossMargins")
-            dupont = calc_dupont(fin, bs); cagr_r, cagr_n = calc_cagr(fin)
-            r1, r2, r3 = st.columns(3)
-            with r1:
-                st.markdown(mf("ROE",   roe*100 if roe else None,".1f%",lambda x:x>15,lambda x:x<5))
-                st.markdown(mf("ROA",   roa*100 if roa else None,".1f%",lambda x:x>8, lambda x:x<2))
-            with r2:
-                st.markdown(mf("M.Bruto",gm*100 if gm else None, ".1f%",lambda x:x>40,lambda x:x<20))
-                st.markdown(mf("M.Neto", pm*100 if pm else None, ".1f%",lambda x:x>15,lambda x:x<3))
-            with r3:
-                if cagr_r is not None:
-                    st.markdown(f"{'✅' if cagr_r>7 else '🟡'} **CAGR Rev:** {cagr_r:+.1f}%")
-                if cagr_n is not None:
-                    st.markdown(f"{'✅' if cagr_n>7 else '🟡'} **CAGR BN:** {cagr_n:+.1f}%")
-            if dupont:
-                d1,d2,d3,d4 = st.columns(4)
-                d1.metric("ROE DuPont",f"{dupont['ROE']:.2f}%")
-                d2.metric("Margen",    f"{dupont['Margen_Neto']:.2f}%")
-                d3.metric("Rot.Act",   f"{dupont['Rot_Activos']:.3f}x")
-                d4.metric("Apalanc",   f"{dupont['Apalanc']:.2f}x")
+    # Medias móviles
+    ma50  = float(closes.tail(50).mean())  if len(closes) >= 50  else None
+    ma200 = float(closes.tail(200).mean()) if len(closes) >= 200 else None
 
-            st.markdown("### 🏥 Salud Financiera")
-            cr = info.get("currentRatio"); de = info.get("debtToEquity")
-            s1, s2, s3 = st.columns(3)
-            with s1: st.markdown(mf("R.Corriente",cr,".2f",lambda x:x>1.5,lambda x:x<1))
-            with s2: st.markdown(mf("D/E",de,".1f",lambda x:x<80,lambda x:x>200))
-            with s3:
-                if not bs.empty and not fin.empty:
-                    z, zz = calc_altman(info, fin, bs)
-                    if z: st.markdown(f"**Altman Z:** {z} → {zz}")
+    # 52w
+    high_52w = float(hist["High"].tail(min(252, len(hist))).max()) \
+               if "High" in hist.columns else float(closes.tail(min(252, len(closes))).max())
+    low_52w  = float(hist["Low"].tail(min(252, len(hist))).min())  \
+               if "Low" in hist.columns  else float(closes.tail(min(252, len(closes))).min())
+    rng_52w  = high_52w - low_52w
+    pos_52w  = ((precio - low_52w) / rng_52w * 100) if rng_52w > 0 else 50
 
-            fs = 0
-            if not fin.empty and not bs.empty and not cf.empty:
-                st.markdown("### 🔢 Piotroski F-Score")
-                fs, fd = calc_piotroski(fin, bs, cf)
-                ifs = "🟢" if fs >= 7 else ("🟡" if fs >= 4 else "🔴")
-                st.markdown(f"### {ifs} F-Score: {fs}/9")
-                for c, v in fd.items():
-                    if c.startswith("_"): continue
-                    st.markdown(f"{'✅' if v['ok'] else '❌'} {c} — `{v['val']}`")
+    # Momentum
+    mom_5d  = (precio/float(closes.iloc[-6])  - 1)*100 if len(closes) > 5  else 0
+    mom_20d = (precio/float(closes.iloc[-21]) - 1)*100 if len(closes) > 20 else 0
+    mom_3m  = (precio/float(closes.iloc[-63]) - 1)*100 if len(closes) > 62 else 0
+    mom_6m  = (precio/float(closes.iloc[-126])- 1)*100 if len(closes) > 125 else 0
 
-            dy = info.get("dividendYield")
-            if dy and dy > 0:
-                st.markdown("### 💵 Dividendos")
-                st.markdown(f"{'✅' if dy>0.03 else '🟡'} **Yield:** {dy*100:.2f}%")
-                dr = info.get("dividendRate")
-                if dr: st.markdown(f"**Pago anual/acción:** {dr:.2f} {moneda}")
-                pay = info.get("payoutRatio")
-                if pay: st.markdown(f"**Payout:** {pay*100:.1f}% — {'✅ Sostenible' if pay<0.6 else '⚠️ Elevado'}")
+    # ── Scores por dimensión (0-100 cada uno) ─────────────────────
+    score_breakdown = {}
 
-            st.markdown("### 🏆 Veredicto Fundamental")
-            pts_v = 0; mx_v = 0
-            if per:    mx_v+=2; pts_v+=(2 if per<15 else 1 if per<25 else 0)
-            if roe:    mx_v+=2; pts_v+=(2 if roe>0.20 else 1 if roe>0.10 else 0)
-            if pm:     mx_v+=2; pts_v+=(2 if pm>0.15 else 1 if pm>0.05 else 0)
-            if de is not None: mx_v+=2; pts_v+=(2 if de<80 else 1 if de<150 else 0)
-            if not fin.empty and not bs.empty and not cf.empty:
-                mx_v+=2; pts_v+=(2 if fs>=7 else 1 if fs>=4 else 0)
-            if mx_v > 0:
-                pf = pts_v / mx_v
-                if   pf >= 0.75: vf_txt = "🟢 FUNDAMENTALMENTE SÓLIDA"
-                elif pf >= 0.45: vf_txt = "🟡 FUNDAMENTALMENTE ACEPTABLE"
-                else:            vf_txt = "🔴 FUNDAMENTALMENTE DÉBIL"
-                st.markdown(f"**{vf_txt}** — Puntuación: {pts_v}/{mx_v} ({pf*100:.0f}%)")
-                st.progress(pf)
-            else:
-                st.warning("Datos insuficientes para el veredicto.")
+    # 1. VALORACIÓN (precio relativo)
+    val_score = 50
+    val_notes = []
+    pe = info.get("trailingPE")
+    if pe and pe > 0:
+        if pe < 15:    val_score = 85; val_notes.append(f"PER {pe:.1f} bajo")
+        elif pe < 25:  val_score = 65; val_notes.append(f"PER {pe:.1f} razonable")
+        elif pe < 40:  val_score = 35; val_notes.append(f"PER {pe:.1f} elevado")
+        else:          val_score = 15; val_notes.append(f"PER {pe:.1f} muy alto")
+    pb = info.get("priceToBook")
+    if pb and pb > 0:
+        if pb < 1:    val_score = min(100, val_score + 15); val_notes.append(f"P/B {pb:.1f} muy bajo")
+        elif pb < 3:  val_notes.append(f"P/B {pb:.1f} normal")
+        else:         val_score = max(0, val_score - 10); val_notes.append(f"P/B {pb:.1f} alto")
+    score_breakdown["💰 Valoración"] = (val_score, " · ".join(val_notes) if val_notes else "Sin datos PER/P-B")
+
+    # 2. CALIDAD (rentabilidad y solidez)
+    qual_score = 50
+    qual_notes = []
+    roe = info.get("returnOnEquity")
+    if roe is not None:
+        roe_pct = roe * 100 if abs(roe) < 5 else roe
+        if roe_pct > 20:    qual_score = 90; qual_notes.append(f"ROE {roe_pct:.1f}% excelente")
+        elif roe_pct > 10:  qual_score = 70; qual_notes.append(f"ROE {roe_pct:.1f}% bueno")
+        elif roe_pct > 0:   qual_score = 40; qual_notes.append(f"ROE {roe_pct:.1f}% bajo")
+        else:               qual_score = 10; qual_notes.append(f"ROE negativo")
+    margins = info.get("profitMargins")
+    if margins is not None:
+        m_pct = margins * 100 if abs(margins) < 5 else margins
+        if m_pct > 20:    qual_score = min(100, qual_score + 10); qual_notes.append(f"Margen {m_pct:.1f}%")
+        elif m_pct > 5:   qual_notes.append(f"Margen {m_pct:.1f}%")
+        else:             qual_score = max(0, qual_score - 10); qual_notes.append(f"Margen bajo {m_pct:.1f}%")
+    debt = info.get("debtToEquity")
+    if debt is not None:
+        if debt < 50:    qual_notes.append(f"Deuda baja")
+        elif debt < 150: qual_notes.append(f"Deuda moderada")
+        else:            qual_score = max(0, qual_score - 15); qual_notes.append(f"Deuda alta D/E={debt:.0f}")
+    score_breakdown["🏆 Calidad"] = (qual_score, " · ".join(qual_notes) if qual_notes else "Sin datos")
+
+    # 3. MOMENTUM (tendencia)
+    mom_score = 50
+    mom_notes = []
+    if mom_3m > 15:    mom_score = 85; mom_notes.append(f"Mom 3M +{mom_3m:.1f}%")
+    elif mom_3m > 5:   mom_score = 70; mom_notes.append(f"Mom 3M +{mom_3m:.1f}%")
+    elif mom_3m > -5:  mom_score = 50; mom_notes.append(f"Mom 3M {mom_3m:+.1f}%")
+    elif mom_3m > -15: mom_score = 30; mom_notes.append(f"Mom 3M {mom_3m:.1f}%")
+    else:              mom_score = 15; mom_notes.append(f"Mom 3M {mom_3m:.1f}%")
+
+    if ma50 and ma200:
+        if precio > ma50 > ma200:
+            mom_score = min(100, mom_score + 10); mom_notes.append("Tendencia alcista MA")
+        elif precio < ma50 < ma200:
+            mom_score = max(0, mom_score - 10); mom_notes.append("Tendencia bajista MA")
+    score_breakdown["🚀 Momentum"] = (mom_score, " · ".join(mom_notes))
+
+    # 4. SENTIMIENTO TÉCNICO
+    sent_score = 50
+    sent_notes = []
+    if rsi_v is not None:
+        if rsi_v > 70:   sent_score = 25; sent_notes.append(f"RSI {rsi_v:.0f} sobrecomprado")
+        elif rsi_v > 60: sent_score = 50; sent_notes.append(f"RSI {rsi_v:.0f} fuerte")
+        elif rsi_v > 40: sent_score = 65; sent_notes.append(f"RSI {rsi_v:.0f} neutro")
+        elif rsi_v > 30: sent_score = 75; sent_notes.append(f"RSI {rsi_v:.0f} débil")
+        else:            sent_score = 85; sent_notes.append(f"RSI {rsi_v:.0f} sobrevendido")
+    if macd_v is not None:
+        if macd_v > 0: sent_notes.append("MACD positivo")
+        else:          sent_notes.append("MACD negativo")
+    if pos_52w > 90:
+        sent_score = max(0, sent_score - 10); sent_notes.append("Cerca máx 52w")
+    elif pos_52w < 20:
+        sent_score = min(100, sent_score + 10); sent_notes.append("Cerca mín 52w")
+    score_breakdown["📊 Sentimiento"] = (sent_score, " · ".join(sent_notes))
+
+    # ── Score global ponderado ─────────────────────────────────────
+    weights = {"💰 Valoración": 0.30, "🏆 Calidad": 0.30,
+               "🚀 Momentum": 0.20, "📊 Sentimiento": 0.20}
+    score_global = sum(score_breakdown[k][0] * w for k, w in weights.items())
+
+    # ── Veredicto narrativo ────────────────────────────────────────
+    if score_global >= 75:
+        verdict = "🟢 COMPRA"
+        verdict_color = "#50fa7b"
+        verdict_lvl = "Convicción alta"
+    elif score_global >= 60:
+        verdict = "🟢 COMPRA MODERADA"
+        verdict_color = "#50fa7b"
+        verdict_lvl = "Convicción media"
+    elif score_global >= 45:
+        verdict = "🟡 NEUTRAL"
+        verdict_color = "#f1fa8c"
+        verdict_lvl = "Sin convicción clara"
+    elif score_global >= 30:
+        verdict = "🔴 EVITAR"
+        verdict_color = "#ff5555"
+        verdict_lvl = "Señales débiles"
     else:
-        st.info("👈 Introduce un ticker y pulsa **Analizar**.")
+        verdict = "🔴 VENDER"
+        verdict_color = "#ff5555"
+        verdict_lvl = "Señales muy negativas"
 
+    # Frase narrativa
+    best_dim  = max(score_breakdown.items(), key=lambda x: x[1][0])
+    worst_dim = min(score_breakdown.items(), key=lambda x: x[1][0])
 
-# ╔═══════════════════════════════════════════════════════════════╗
-# ║  CARTERA                                                      ║
-# ╚═══════════════════════════════════════════════════════════════╝
+    narrative = (
+        f"**{nombre}** muestra un score global de **{score_global:.0f}/100**. "
+        f"Su punto fuerte es **{best_dim[0]}** ({best_dim[1][0]:.0f}/100): {best_dim[1][1]}. "
+        f"El punto débil es **{worst_dim[0]}** ({worst_dim[1][0]:.0f}/100): {worst_dim[1][1]}."
+    )
+
+    # ── BLOQUE VEREDICTO ───────────────────────────────────────────
+    st.markdown(
+        f"<div style='background:linear-gradient(135deg, {verdict_color}22 0%, #1e1e2e 100%);"
+        f"border-left:5px solid {verdict_color};padding:20px;border-radius:8px;margin:16px 0'>"
+        f"<div style='font-size:28px;font-weight:bold;color:{verdict_color}'>{verdict}</div>"
+        f"<div style='font-size:14px;color:#888;margin-bottom:8px'>{verdict_lvl} — Score: "
+        f"<b style='color:#f8f8f2'>{score_global:.0f}/100</b></div>"
+        f"<div style='font-size:14px;color:#ddd;margin-top:10px;line-height:1.5'>{narrative}</div>"
+        f"</div>",
+        unsafe_allow_html=True
+    )
+
+    # ═══════════════════════════════════════════════════════════════
+    # TABS PRINCIPALES
+    # ═══════════════════════════════════════════════════════════════
+    tab_resumen, tab_tecnico, tab_fundamental, tab_peers, tab_noticias = st.tabs([
+        "📋 Resumen",
+        "📊 Técnico",
+        "💼 Fundamental",
+        "🆚 Peers",
+        "📰 Noticias"
+    ])
+
+    # ── TAB 1: RESUMEN (decisión-ready) ────────────────────────────
+    with tab_resumen:
+        # Score breakdown — gauge + barras
+        col_g1, col_g2 = st.columns([1, 2])
+
+        with col_g1:
+            # Gauge del score global
+            fig_gauge = go.Figure(go.Indicator(
+                mode="gauge+number",
+                value=score_global,
+                domain={"x":[0,1], "y":[0,1]},
+                number={"font":{"size":42, "color":"#f8f8f2"}},
+                gauge={
+                    "axis": {"range":[0,100], "tickcolor":"#888"},
+                    "bar":  {"color": verdict_color},
+                    "bgcolor": "#1e1e2e",
+                    "steps": [
+                        {"range":[0,30],   "color":"#3a1e1e"},
+                        {"range":[30,45],  "color":"#3a2e1e"},
+                        {"range":[45,60],  "color":"#3a3a1e"},
+                        {"range":[60,75],  "color":"#1e3a2e"},
+                        {"range":[75,100], "color":"#1e3a1e"},
+                    ],
+                }
+            ))
+            fig_gauge.update_layout(
+                template="plotly_dark", height=240,
+                margin=dict(l=20,r=20,t=20,b=20),
+                paper_bgcolor="#12121f"
+            )
+            st.plotly_chart(fig_gauge, use_container_width=True)
+
+        with col_g2:
+            st.markdown("**Desglose del score**")
+            for dim_name, (dim_score, dim_note) in score_breakdown.items():
+                # Color por score
+                if dim_score >= 70:    bar_color = "#50fa7b"
+                elif dim_score >= 50:  bar_color = "#f1fa8c"
+                elif dim_score >= 30:  bar_color = "#ffb86c"
+                else:                  bar_color = "#ff5555"
+
+                pct = dim_score
+                st.markdown(
+                    f"<div style='margin-bottom:10px'>"
+                    f"<div style='display:flex;justify-content:space-between;margin-bottom:4px'>"
+                    f"<span style='color:#f8f8f2;font-weight:bold'>{dim_name}</span>"
+                    f"<span style='color:{bar_color};font-weight:bold'>{dim_score:.0f}/100</span>"
+                    f"</div>"
+                    f"<div style='background:#1e1e2e;border-radius:4px;height:8px;overflow:hidden'>"
+                    f"<div style='background:{bar_color};width:{pct}%;height:100%'></div>"
+                    f"</div>"
+                    f"<div style='font-size:11px;color:#888;margin-top:3px'>{dim_note}</div>"
+                    f"</div>",
+                    unsafe_allow_html=True
+                )
+
+        st.divider()
+
+        # ── NIVELES OPERATIVOS ─────────────────────────────────────
+        st.markdown("### 🎯 Niveles operativos")
+
+        if atr_v and ma50:
+            # Cálculo de niveles
+            entrada_optima = ma50  # MA50 como zona de soporte
+            entrada_agresiva = precio
+            stop_loss = precio - 2 * atr_v
+            objetivo_1 = precio + 2 * atr_v
+            objetivo_2 = precio + 4 * atr_v
+
+            # Analyst target si disponible
+            target_consenso = info.get("targetMeanPrice")
+
+            # Risk/Reward
+            risk = precio - stop_loss
+            reward = objetivo_1 - precio
+            rr_ratio = reward / risk if risk > 0 else 0
+
+            col_n1, col_n2, col_n3 = st.columns(3)
+
+            with col_n1:
+                st.markdown("**🟢 Entradas**")
+                st.markdown(f"<div style='background:#1e3a1e;padding:8px;border-radius:4px;margin-bottom:6px'>"
+                            f"<b>Óptima:</b> {entrada_optima:.2f} {moneda}<br>"
+                            f"<span style='font-size:11px;color:#888'>Test de MA50 ({((entrada_optima/precio-1)*100):+.1f}%)</span>"
+                            f"</div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='background:#1e2e1e;padding:8px;border-radius:4px'>"
+                            f"<b>Agresiva:</b> {entrada_agresiva:.2f} {moneda}<br>"
+                            f"<span style='font-size:11px;color:#888'>Precio actual</span>"
+                            f"</div>", unsafe_allow_html=True)
+
+            with col_n2:
+                st.markdown("**🛑 Stop loss**")
+                stop_pct = (stop_loss/precio - 1)*100
+                st.markdown(f"<div style='background:#3a1e1e;padding:8px;border-radius:4px'>"
+                            f"<b>{stop_loss:.2f} {moneda}</b><br>"
+                            f"<span style='font-size:11px;color:#888'>{stop_pct:+.1f}% (2× ATR)</span>"
+                            f"</div>", unsafe_allow_html=True)
+
+                st.markdown(f"<div style='background:#1e1e2e;padding:8px;border-radius:4px;margin-top:10px'>"
+                            f"<b>R/R Ratio: {rr_ratio:.1f}</b><br>"
+                            f"<span style='font-size:11px;color:#888'>"
+                            f"{'✅ Favorable' if rr_ratio >= 2 else '⚠️ Bajo' if rr_ratio < 1.5 else '🟡 Aceptable'}"
+                            f"</span></div>", unsafe_allow_html=True)
+
+            with col_n3:
+                st.markdown("**🎯 Objetivos**")
+                obj1_pct = (objetivo_1/precio - 1)*100
+                obj2_pct = (objetivo_2/precio - 1)*100
+                st.markdown(f"<div style='background:#1e3a1e;padding:8px;border-radius:4px;margin-bottom:6px'>"
+                            f"<b>TP1:</b> {objetivo_1:.2f} ({obj1_pct:+.1f}%)<br>"
+                            f"<span style='font-size:11px;color:#888'>R/R 2:1</span>"
+                            f"</div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='background:#1e3a1e;padding:8px;border-radius:4px'>"
+                            f"<b>TP2:</b> {objetivo_2:.2f} ({obj2_pct:+.1f}%)<br>"
+                            f"<span style='font-size:11px;color:#888'>R/R 4:1</span>"
+                            f"</div>", unsafe_allow_html=True)
+                if target_consenso:
+                    tc_pct = (target_consenso/precio - 1)*100
+                    st.markdown(f"<div style='background:#1e2e3a;padding:8px;border-radius:4px;margin-top:6px'>"
+                                f"<b>TP Analistas:</b> {target_consenso:.2f} ({tc_pct:+.1f}%)<br>"
+                                f"<span style='font-size:11px;color:#888'>Consenso</span>"
+                                f"</div>", unsafe_allow_html=True)
+        else:
+            st.info("No hay suficientes datos para calcular niveles operativos")
+
+        st.divider()
+
+        # ── RIESGOS IDENTIFICADOS ──────────────────────────────────
+        st.markdown("### ⚠️ Riesgos identificados")
+
+        riesgos = []
+
+        if rsi_v and rsi_v > 70:
+            riesgos.append(f"RSI sobrecomprado ({rsi_v:.0f}) — riesgo de corrección")
+        if rsi_v and rsi_v < 30:
+            riesgos.append(f"RSI sobrevendido ({rsi_v:.0f}) — posible suelo pero cuidado con caídas adicionales")
+        if pos_52w > 95:
+            riesgos.append(f"Cotiza en máximos de 52 semanas ({pos_52w:.0f}%) — posible resistencia")
+        if pos_52w < 10:
+            riesgos.append(f"Cerca de mínimos de 52 semanas ({pos_52w:.0f}%) — investigar la causa")
+        if pe and pe > 40:
+            riesgos.append(f"PER muy elevado ({pe:.0f}) — exigente en valoración")
+        if score_breakdown["🏆 Calidad"][0] < 35:
+            riesgos.append("Calidad fundamental débil — bajos márgenes o ROE")
+        if score_breakdown["🚀 Momentum"][0] < 30:
+            riesgos.append("Momentum negativo — tendencia bajista marcada")
+        if mcap and mcap < 2e9:
+            riesgos.append(f"Small cap (${mcap/1e9:.1f}B) — mayor volatilidad y menor liquidez")
+        if info.get("beta") and info["beta"] > 1.5:
+            riesgos.append(f"Beta elevado ({info['beta']:.1f}) — más volátil que el mercado")
+
+        if riesgos:
+            for r in riesgos:
+                st.markdown(f"- ⚠️ {r}")
+        else:
+            st.success("✅ Sin riesgos críticos identificados")
+
+    # ── TAB 2: TÉCNICO ─────────────────────────────────────────────
+    with tab_tecnico:
+        # Gráfico principal: precio + MAs + Bollinger
+        fig_tech = go.Figure()
+        fig_tech.add_trace(go.Candlestick(
+            x=hist.index,
+            open=hist["Open"]   if "Open"  in hist.columns else closes,
+            high=hist["High"]   if "High"  in hist.columns else closes,
+            low=hist["Low"]     if "Low"   in hist.columns else closes,
+            close=closes,
+            name="Precio",
+            increasing_line_color="#50fa7b",
+            decreasing_line_color="#ff5555"
+        ))
+
+        if ma50:
+            fig_tech.add_trace(go.Scatter(
+                x=hist.index, y=closes.rolling(50).mean(),
+                name="MA50", line=dict(color="#8be9fd", width=1.5)
+            ))
+        if ma200:
+            fig_tech.add_trace(go.Scatter(
+                x=hist.index, y=closes.rolling(200).mean(),
+                name="MA200", line=dict(color="#ff79c6", width=1.5)
+            ))
+        if not bb_up.empty:
+            fig_tech.add_trace(go.Scatter(
+                x=hist.index, y=bb_up,
+                name="BB Sup", line=dict(color="rgba(189,147,249,0.5)", dash="dot")
+            ))
+            fig_tech.add_trace(go.Scatter(
+                x=hist.index, y=bb_low,
+                name="BB Inf", line=dict(color="rgba(189,147,249,0.5)", dash="dot"),
+                fill="tonexty", fillcolor="rgba(189,147,249,0.1)"
+            ))
+
+        fig_tech.update_layout(
+            title=f"{ticker_in} — Análisis técnico",
+            template="plotly_dark",
+            paper_bgcolor="#12121f", plot_bgcolor="#1e1e2e",
+            height=500, xaxis_rangeslider_visible=False,
+            hovermode="x unified"
+        )
+        st.plotly_chart(fig_tech, use_container_width=True)
+
+        # Indicadores en columnas
+        col_t1, col_t2, col_t3, col_t4 = st.columns(4)
+        col_t1.metric("RSI 14", f"{rsi_v:.1f}" if rsi_v else "N/A",
+                      help="Sobrecomprado >70, sobrevendido <30")
+        col_t2.metric("MACD", f"{macd_v:+.2f}" if macd_v else "N/A",
+                      help="Positivo: alcista, negativo: bajista")
+        col_t3.metric("ADX 14", f"{adx_v:.1f}" if adx_v else "N/A",
+                      help=">25 indica tendencia fuerte")
+        col_t4.metric("ATR 14", f"{atr_v:.2f}" if atr_v else "N/A",
+                      help="Volatilidad media diaria")
+
+        col_t5, col_t6, col_t7, col_t8 = st.columns(4)
+        col_t5.metric("Pos. 52w", f"{pos_52w:.0f}%")
+        col_t6.metric("Mom. 5d",  f"{mom_5d:+.1f}%")
+        col_t7.metric("Mom. 20d", f"{mom_20d:+.1f}%")
+        col_t8.metric("Mom. 3m",  f"{mom_3m:+.1f}%")
+
+        if ma50 and ma200:
+            col_t9, col_t10, col_t11 = st.columns(3)
+            col_t9.metric("vs MA50",  f"{(precio/ma50-1)*100:+.1f}%")
+            col_t10.metric("vs MA200", f"{(precio/ma200-1)*100:+.1f}%")
+            col_t11.metric("BB %",    f"{bb_pct:.0f}%",
+                           help="0% en banda inferior, 100% en banda superior")
+
+    # ── TAB 3: FUNDAMENTAL ─────────────────────────────────────────
+    with tab_fundamental:
+        st.markdown("### 💼 Análisis fundamental")
+
+        col_f1, col_f2, col_f3 = st.columns(3)
+        with col_f1:
+            st.markdown("**Valoración**")
+            if pe:        st.metric("PER (TTM)", f"{pe:.1f}")
+            fpe = info.get("forwardPE")
+            if fpe:       st.metric("PER Forward", f"{fpe:.1f}")
+            if pb:        st.metric("P/B", f"{pb:.1f}")
+            ps = info.get("priceToSalesTrailing12Months")
+            if ps:        st.metric("P/S", f"{ps:.1f}")
+
+        with col_f2:
+            st.markdown("**Rentabilidad**")
+            if roe is not None:
+                roe_pct = roe * 100 if abs(roe) < 5 else roe
+                st.metric("ROE", f"{roe_pct:.1f}%")
+            roa = info.get("returnOnAssets")
+            if roa is not None:
+                roa_pct = roa * 100 if abs(roa) < 5 else roa
+                st.metric("ROA", f"{roa_pct:.1f}%")
+            if margins is not None:
+                m_pct = margins * 100 if abs(margins) < 5 else margins
+                st.metric("Margen neto", f"{m_pct:.1f}%")
+            gm = info.get("grossMargins")
+            if gm is not None:
+                gm_pct = gm * 100 if abs(gm) < 5 else gm
+                st.metric("Margen bruto", f"{gm_pct:.1f}%")
+
+        with col_f3:
+            st.markdown("**Solidez & Dividendos**")
+            if debt is not None:
+                st.metric("Deuda/Equity", f"{debt:.0f}")
+            cr = info.get("currentRatio")
+            if cr:        st.metric("Current Ratio", f"{cr:.2f}")
+            dy = info.get("dividendYield")
+            if dy:
+                dy_pct = dy * 100 if abs(dy) < 1 else dy
+                st.metric("Dividend Yield", f"{dy_pct:.2f}%")
+            beta = info.get("beta")
+            if beta:      st.metric("Beta", f"{beta:.2f}")
+
+        st.divider()
+        st.markdown("### 🎓 Modelos clásicos")
+
+        col_p1, col_p2, col_p3, col_p4 = st.columns(4)
+
+        try:
+            piotr = calc_piotroski(fin, bs, cf)
+            col_p1.metric("Piotroski F-Score", f"{piotr}/9",
+                         help="≥7 fuerte · 4-6 medio · ≤3 débil")
+        except Exception:
+            col_p1.metric("Piotroski", "N/A")
+
+        try:
+            altman = calc_altman(info, fin, bs)
+            if altman is not None:
+                col_p2.metric("Altman Z-Score", f"{altman:.2f}",
+                             help=">3 sano · 1.8-3 zona gris · <1.8 distress")
+            else:
+                col_p2.metric("Altman", "N/A")
+        except Exception:
+            col_p2.metric("Altman", "N/A")
+
+        try:
+            graham = calc_graham(info)
+            if graham is not None:
+                graham_disc = (precio/graham - 1) * 100
+                col_p3.metric("Núm. Graham", f"{graham:.2f}",
+                             delta=f"{graham_disc:+.1f}% vs precio")
+            else:
+                col_p3.metric("Graham", "N/A")
+        except Exception:
+            col_p3.metric("Graham", "N/A")
+
+        try:
+            fcf_y = calc_fcf_yield(info, cf)
+            if fcf_y is not None:
+                col_p4.metric("FCF Yield", f"{fcf_y:.1f}%",
+                             help=">5% atractivo, >8% excelente")
+            else:
+                col_p4.metric("FCF Yield", "N/A")
+        except Exception:
+            col_p4.metric("FCF Yield", "N/A")
+
+    # ── TAB 4: PEERS ───────────────────────────────────────────────
+    with tab_peers:
+        st.markdown("### 🆚 Comparativa con peers del sector")
+        st.caption(f"Sector: **{sector}** — comparativa de métricas clave con compañías similares")
+
+        # Peer mapping basado en sector + market cap
+        peers_map = {
+            "Technology":           ["AAPL","MSFT","NVDA","GOOGL","META","AMZN"],
+            "Consumer Cyclical":    ["AMZN","TSLA","HD","NKE","SBUX","MCD"],
+            "Communication Services":["GOOGL","META","NFLX","DIS","T","VZ"],
+            "Financial Services":   ["JPM","BAC","WFC","GS","MS","C"],
+            "Healthcare":           ["JNJ","UNH","PFE","ABBV","MRK","LLY"],
+            "Industrials":          ["HON","UNP","UPS","RTX","BA","CAT"],
+            "Consumer Defensive":   ["WMT","PG","KO","PEP","COST","CL"],
+            "Energy":               ["XOM","CVX","COP","SLB","EOG","PSX"],
+            "Basic Materials":      ["LIN","SHW","ECL","APD","FCX","NEM"],
+            "Utilities":            ["NEE","DUK","SO","D","AEP","XEL"],
+            "Real Estate":          ["PLD","AMT","EQIX","PSA","O","WELL"],
+        }
+
+        peer_list = peers_map.get(sector, [])
+        # Quitar el ticker actual y limitar a 5
+        peer_list = [p for p in peer_list if p != ticker_in][:5]
+
+        if not peer_list:
+            st.info(f"No hay lista de peers definida para sector '{sector}'. "
+                    f"Esta comparativa funciona mejor con tickers US de sectores principales.")
+        else:
+            # Añadir el ticker actual al inicio para comparar
+            tickers_compare = [ticker_in] + peer_list
+
+            with st.spinner(f"Cargando peers: {', '.join(peer_list)}..."):
+                peer_rows = []
+                for t in tickers_compare:
+                    try:
+                        h_p, info_p = descargar(t, "1y")
+                        if h_p.empty:
+                            continue
+                        precio_p = float(h_p["Close"].iloc[-1])
+                        # Mom 3m
+                        mom3_p = (precio_p/float(h_p["Close"].iloc[-63]) - 1)*100 \
+                                 if len(h_p) > 62 else 0
+                        # Mom 1y
+                        mom1y_p = (precio_p/float(h_p["Close"].iloc[0]) - 1)*100
+
+                        roe_p = info_p.get("returnOnEquity")
+                        roe_pct_p = (roe_p*100 if roe_p and abs(roe_p)<5 else roe_p) if roe_p else None
+
+                        m_p = info_p.get("profitMargins")
+                        m_pct_p = (m_p*100 if m_p and abs(m_p)<5 else m_p) if m_p else None
+
+                        peer_rows.append({
+                            "Ticker":   t + (" 👈" if t == ticker_in else ""),
+                            "Precio":   round(precio_p, 2),
+                            "PER":      round(info_p.get("trailingPE"), 1) if info_p.get("trailingPE") else None,
+                            "P/B":      round(info_p.get("priceToBook"), 1) if info_p.get("priceToBook") else None,
+                            "ROE %":    round(roe_pct_p, 1) if roe_pct_p else None,
+                            "Margen %": round(m_pct_p, 1) if m_pct_p else None,
+                            "Mom 3M %": round(mom3_p, 1),
+                            "Mom 1Y %": round(mom1y_p, 1),
+                            "Beta":     round(info_p.get("beta"), 2) if info_p.get("beta") else None,
+                        })
+                    except Exception:
+                        continue
+
+            if peer_rows:
+                df_peers = pd.DataFrame(peer_rows)
+                st.dataframe(
+                    df_peers.style.map(_color_pct, subset=["Mom 3M %","Mom 1Y %"]),
+                    use_container_width=True, hide_index=True
+                )
+
+                # Comentario automático: dónde destaca y dónde queda atrás
+                target_row = next((r for r in peer_rows if "👈" in r["Ticker"]), None)
+                if target_row:
+                    insights = []
+                    # Comparar PER
+                    pers = [r["PER"] for r in peer_rows if r["PER"] is not None and "👈" not in r["Ticker"]]
+                    if pers and target_row["PER"]:
+                        avg_per = sum(pers)/len(pers)
+                        if target_row["PER"] < avg_per * 0.85:
+                            insights.append(f"📉 PER {target_row['PER']:.1f} **por debajo** de la media de peers ({avg_per:.1f}) — más barato")
+                        elif target_row["PER"] > avg_per * 1.15:
+                            insights.append(f"📈 PER {target_row['PER']:.1f} **por encima** de la media ({avg_per:.1f}) — más caro")
+
+                    # Comparar Mom 3M
+                    moms = [r["Mom 3M %"] for r in peer_rows if "👈" not in r["Ticker"]]
+                    if moms:
+                        avg_mom = sum(moms)/len(moms)
+                        if target_row["Mom 3M %"] > avg_mom + 5:
+                            insights.append(f"🚀 Momentum 3M {target_row['Mom 3M %']:+.1f}% **mejor** que peers ({avg_mom:+.1f}%)")
+                        elif target_row["Mom 3M %"] < avg_mom - 5:
+                            insights.append(f"📉 Momentum 3M {target_row['Mom 3M %']:+.1f}% **peor** que peers ({avg_mom:+.1f}%)")
+
+                    # Comparar ROE
+                    roes = [r["ROE %"] for r in peer_rows if r["ROE %"] is not None and "👈" not in r["Ticker"]]
+                    if roes and target_row["ROE %"]:
+                        avg_roe = sum(roes)/len(roes)
+                        if target_row["ROE %"] > avg_roe + 5:
+                            insights.append(f"💪 ROE {target_row['ROE %']:.1f}% **superior** a peers ({avg_roe:.1f}%)")
+
+                    if insights:
+                        st.markdown("**📌 Insights:**")
+                        for ins in insights:
+                            st.markdown(f"- {ins}")
+
+    # ── TAB 5: NOTICIAS ────────────────────────────────────────────
+    with tab_noticias:
+        st.markdown(f"### 📰 Noticias recientes de {ticker_in}")
+
+        if fh_client is None:
+            st.info("📭 Finnhub no configurado")
+        elif "." in ticker_in:
+            st.info("Finnhub solo soporta tickers US. Para tickers extranjeros usa Yahoo Finance directamente.")
+            st.link_button(f"Ver noticias de {ticker_in} en Yahoo Finance",
+                           f"https://finance.yahoo.com/quote/{ticker_in}/news")
+        else:
+            try:
+                today_str    = datetime.now().strftime("%Y-%m-%d")
+                week_ago_str = (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d")
+                news = fh_client.company_news(ticker_in, _from=week_ago_str, to=today_str)
+
+                if news:
+                    for n in news[:10]:
+                        fecha_n = datetime.fromtimestamp(n.get("datetime", 0)).strftime("%d-%m %H:%M") \
+                                  if n.get("datetime") else ""
+                        st.markdown(
+                            f"<div style='background:#1e1e2e;padding:12px;margin-bottom:8px;"
+                            f"border-radius:6px;border-left:3px solid #ff79c6'>"
+                            f"<div style='display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px'>"
+                            f"<span style='color:#888;font-size:11px'>{n.get('source','')} · {fecha_n}</span>"
+                            f"<a href='{n.get('url','')}' target='_blank' "
+                            f"style='color:#8be9fd;font-size:12px;text-decoration:none'>Leer →</a>"
+                            f"</div>"
+                            f"<div style='margin-top:6px;font-size:14px;color:#f8f8f2;font-weight:bold'>"
+                            f"{n.get('headline','')}</div>"
+                            f"<div style='margin-top:4px;font-size:12px;color:#aaa'>"
+                            f"{(n.get('summary','') or '')[:200]}"
+                            f"{'...' if len(n.get('summary','') or '') >= 200 else ''}"
+                            f"</div></div>",
+                            unsafe_allow_html=True
+                        )
+                else:
+                    st.info("No hay noticias recientes para este ticker.")
+            except Exception as e:
+                st.error(f"Error cargando noticias: {e}")
+
+    # ── Footer con links ───────────────────────────────────────────
+    st.divider()
+    ticker_clean = ticker_in.split(".")[0]
+    col_l1, col_l2, col_l3, col_l4 = st.columns(4)
+    col_l1.link_button("📊 Finviz",
+        f"https://finviz.com/quote.ashx?t={ticker_clean}", use_container_width=True)
+    col_l2.link_button("📰 Yahoo News",
+        f"https://finance.yahoo.com/quote/{ticker_in}/news", use_container_width=True)
+    col_l3.link_button("📈 StockAnalysis",
+        f"https://stockanalysis.com/stocks/{ticker_clean.lower()}/", use_container_width=True)
+    col_l4.link_button("🕯️ TradingView",
+        f"https://www.tradingview.com/chart/?symbol={ticker_in}", use_container_width=True)
+
+    st.caption(f"🕐 Análisis realizado: {datetime.now().strftime('%H:%M %d-%m-%Y')} · "
+               f"Datos: yfinance + FMP + Finnhub")
+
 elif pagina == "💼 Cartera":
     TD = 252
     with st.sidebar:
@@ -3522,116 +4054,3 @@ elif pagina == "📊 Macro":
             """)
         else:
             st.warning("No se pudieron cargar los ETFs de renta fija. Reintenta en unos momentos.")
-
-
-# ╔═══════════════════════════════════════════════════════════════╗
-# ║  RESEARCH ASSISTANT (Claude API)                              ║
-# ╚═══════════════════════════════════════════════════════════════╝
-elif pagina == "🤖 Research":
-    st.header("🤖 Research Assistant")
-    st.markdown("Pregunta sobre cualquier activo, sector o tema de mercado. El asistente busca datos reales y genera un análisis.")
-
-    pregunta = st.text_area("Tu pregunta:",
-        placeholder="Ej: ¿Qué opinan los analistas sobre NVDA? ¿Es buen momento para bonos US 10Y? ¿Cómo afectan los aranceles a MAIRE.MI?",
-        height=100)
-
-    if st.button("🔍 Investigar", type="primary", use_container_width=True) and pregunta:
-        with st.spinner("Investigando..."):
-            import re
-            contexto_parts = []
-            posibles = re.findall(r'\b[A-Z]{1,5}\b', pregunta.upper())
-            stop_words = {"QUE","LOS","LAS","DEL","POR","CON","UNA","COMO","PARA","MAS",
-                          "SER","HAY","SON","EST","THE","AND","FOR","LAS","LES"}
-            tickers_v = [t for t in posibles if t not in stop_words][:3]
-
-            for t in tickers_v:
-                h, info_r = descargar(t, "6mo")
-                if not h.empty:
-                    p_r  = h["Close"].iloc[-1]
-                    c_1m = ((p_r / h["Close"].iloc[-22] - 1)*100) if len(h)>22 else 0
-                    pais = info_r.get("_fmp_country","")
-                    src  = info_r.get("_source_metrics","Yahoo Finance")
-                    contexto_parts.append(
-                        f"**{t}**: Precio {p_r:.2f}, cambio 1M: {c_1m:+.1f}%, "
-                        f"PE: {info_r.get('trailingPE','N/A')}, "
-                        f"Sector: {info_r.get('sector','N/A')}, "
-                        f"País: {pais if pais else 'US'}, "
-                        f"Target: {info_r.get('targetMeanPrice','N/A')}, "
-                        f"Consenso: {info_r.get('recommendationKey','N/A')}, "
-                        f"Fuente métricas: {src}"
-                    )
-
-            noticias_ctx = []
-            if fh_client and tickers_v:
-                for t in tickers_v[:2]:
-                    try:
-                        today    = datetime.now().strftime("%Y-%m-%d")
-                        week_ago = (datetime.now()-timedelta(days=7)).strftime("%Y-%m-%d")
-                        news     = fh_client.company_news(t, _from=week_ago, to=today)
-                        if news:
-                            for n in news[:3]:
-                                noticias_ctx.append(f"- [{n.get('source','')}] {n.get('headline','')}")
-                    except Exception:
-                        pass
-
-            macro_ctx = []
-            if fred_client:
-                for name, sid in [("Fed Funds Rate","FEDFUNDS"),("US 10Y","DGS10"),("VIX","VIXCLS")]:
-                    v = get_last_fred(sid)
-                    if v: macro_ctx.append(f"{name}: {v:.2f}")
-
-            contexto = "DATOS DE MERCADO REALES (hoy):\n"
-            if contexto_parts: contexto += "\n".join(contexto_parts) + "\n"
-            if macro_ctx:      contexto += "\nMACRO: " + " | ".join(macro_ctx) + "\n"
-            if noticias_ctx:   contexto += "\nNOTICIAS RECIENTES:\n" + "\n".join(noticias_ctx[:6]) + "\n"
-
-            try:
-                response = requests.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers={"Content-Type": "application/json"},
-                    json={
-                        "model": "claude-sonnet-4-20250514",
-                        "max_tokens": 1500,
-                        "messages": [{"role": "user", "content": f"""Eres un analista financiero senior de banca privada.
-El cliente te hace esta pregunta: "{pregunta}"
-
-Tienes acceso a estos datos reales actualizados:
-{contexto}
-
-Responde de forma profesional pero accesible, como un informe breve de research. Incluye:
-1. Resumen ejecutivo (2-3 frases)
-2. Datos clave que apoyan tu análisis
-3. Riesgos a considerar
-4. Conclusión con recomendación clara
-
-Responde en español."""}]
-                    }, timeout=30)
-                if response.status_code == 200:
-                    data = response.json()
-                    respuesta = "".join(b["text"] for b in data.get("content", []) if b.get("type") == "text")
-                    st.markdown("---")
-                    st.subheader("📋 Informe de Research")
-                    st.markdown(respuesta)
-                    st.markdown("---")
-                    st.caption("📡 **Fuentes:** Precios: Finnhub / Yahoo Finance / FMP | "
-                               "Macro: FRED | Noticias: Finnhub | Análisis: Claude API (Anthropic)")
-                    with st.expander("📊 Datos brutos utilizados"):
-                        st.text(contexto)
-                else:
-                    st.error(f"Error API: {response.status_code}")
-                    st.markdown(contexto)
-            except Exception as e:
-                st.warning(f"No se pudo conectar con Claude API: {e}")
-                st.markdown(contexto)
-    else:
-        st.info("Escribe una pregunta arriba y pulsa **Investigar**.")
-        st.markdown("""
-        **Ejemplos de preguntas:**
-        - ¿Qué opinan los analistas sobre NVDA?
-        - ¿Es buen momento para entrar en AAPL?
-        - ¿Cómo está el mercado de bonos US?
-        - Análisis del sector tecnológico europeo
-        - ¿Cómo afecta la subida de tipos a los REITs?
-        - Dame un resumen de las noticias de TSLA esta semana
-        - ¿Cuál es el riesgo de invertir en bonos emergentes ahora?
-        """)
