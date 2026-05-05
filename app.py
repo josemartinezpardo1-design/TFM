@@ -2892,18 +2892,30 @@ elif pagina == "📈 Análisis Individual":
     rsi_s = calc_rsi(closes); rsi_v = float(rsi_s.iloc[-1]) if not rsi_s.empty else None
     macd_line, macd_sig, macd_hist = calc_macd(closes)
     macd_v = float(macd_hist.iloc[-1]) if not macd_hist.empty else None
-    bb_up, bb_mid, bb_low = calc_bb(closes)
-    bb_pct = ((precio - float(bb_low.iloc[-1])) /
-              (float(bb_up.iloc[-1]) - float(bb_low.iloc[-1])) * 100) \
-             if float(bb_up.iloc[-1]) > float(bb_low.iloc[-1]) else 50
+    try:
+        bb_up, bb_mid, bb_low, bb_pct_s = calc_bb(closes)
+        if not bb_up.empty and not bb_low.empty:
+            bb_low_v = float(bb_low.iloc[-1])
+            bb_up_v  = float(bb_up.iloc[-1])
+            bb_pct = ((precio - bb_low_v) / (bb_up_v - bb_low_v) * 100) \
+                     if bb_up_v > bb_low_v else 50
+        else:
+            bb_pct = 50
+    except Exception:
+        bb_up = pd.Series(dtype=float)
+        bb_mid = pd.Series(dtype=float)
+        bb_low = pd.Series(dtype=float)
+        bb_pct = 50
 
     try:
-        adx_s = calc_adx(hist); adx_v = float(adx_s.iloc[-1]) if not adx_s.empty else None
+        adx_s, _pdi, _mdi = calc_adx(hist)
+        adx_v = float(adx_s.iloc[-1]) if not adx_s.empty else None
     except Exception:
         adx_v = None
 
     try:
-        atr_s = calc_atr(hist); atr_v = float(atr_s.iloc[-1]) if not atr_s.empty else None
+        atr_s, atr_pct_s = calc_atr(hist)
+        atr_v = float(atr_s.iloc[-1]) if not atr_s.empty else None
     except Exception:
         atr_v = None
 
@@ -3337,16 +3349,23 @@ elif pagina == "📈 Análisis Individual":
         col_p1, col_p2, col_p3, col_p4 = st.columns(4)
 
         try:
-            piotr = calc_piotroski(fin, bs, cf)
-            col_p1.metric("Piotroski F-Score", f"{piotr}/9",
+            piotr_result = calc_piotroski(fin, bs, cf)
+            # Función devuelve (score, detalles) o int
+            piotr_score = piotr_result[0] if isinstance(piotr_result, tuple) else piotr_result
+            col_p1.metric("Piotroski F-Score", f"{piotr_score}/9",
                          help="≥7 fuerte · 4-6 medio · ≤3 débil")
         except Exception:
             col_p1.metric("Piotroski", "N/A")
 
         try:
-            altman = calc_altman(info, fin, bs)
-            if altman is not None:
-                col_p2.metric("Altman Z-Score", f"{altman:.2f}",
+            altman_result = calc_altman(info, fin, bs)
+            # Función devuelve (z_score, zona) o (None, "Sin datos")
+            if isinstance(altman_result, tuple):
+                altman_z, _ = altman_result
+            else:
+                altman_z = altman_result
+            if altman_z is not None:
+                col_p2.metric("Altman Z-Score", f"{altman_z:.2f}",
                              help=">3 sano · 1.8-3 zona gris · <1.8 distress")
             else:
                 col_p2.metric("Altman", "N/A")
@@ -4054,3 +4073,8 @@ elif pagina == "📊 Macro":
             """)
         else:
             st.warning("No se pudieron cargar los ETFs de renta fija. Reintenta en unos momentos.")
+
+
+# ╔═══════════════════════════════════════════════════════════════╗
+# ║  RESEARCH ASSISTANT (Claude API)                              ║
+# ╚═══════════════════════════════════════════════════════════════╝
