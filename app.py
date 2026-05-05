@@ -1440,15 +1440,15 @@ if pagina == "🌅 Outlook":
             st.markdown("**🟢 Líderes**")
             top3 = df_sect.head(3)
             for _, row in top3.iterrows():
-                st.markdown(f"<div style='padding:6px;background:#1e3a1e;border-radius:4px;margin-bottom:4px'>"
-                            f"<b>{row['Sector']}</b> <span style='color:#50fa7b;float:right'>+{row['Cambio %']:.2f}%</span></div>",
+                st.markdown(f"<div style='padding:8px 12px;background:#1e3a1e;border-radius:6px;margin-bottom:5px;border-left:3px solid #50fa7b'>"
+                            f"<b style='color:#ffffff'>{row['Sector']}</b> <span style='color:#50fa7b;float:right;font-weight:bold'>+{row['Cambio %']:.2f}%</span></div>",
                             unsafe_allow_html=True)
         with col_sec2:
             st.markdown("**🔴 Más débiles**")
             bot3 = df_sect.tail(3).iloc[::-1]
             for _, row in bot3.iterrows():
-                st.markdown(f"<div style='padding:6px;background:#3a1e1e;border-radius:4px;margin-bottom:4px'>"
-                            f"<b>{row['Sector']}</b> <span style='color:#ff5555;float:right'>{row['Cambio %']:.2f}%</span></div>",
+                st.markdown(f"<div style='padding:8px 12px;background:#3a1e1e;border-radius:6px;margin-bottom:5px;border-left:3px solid #ff5555'>"
+                            f"<b style='color:#ffffff'>{row['Sector']}</b> <span style='color:#ff5555;float:right;font-weight:bold'>{row['Cambio %']:.2f}%</span></div>",
                             unsafe_allow_html=True)
 
     st.divider()
@@ -3052,12 +3052,13 @@ elif pagina == "📈 Análisis Individual":
 
     # ── BLOQUE VEREDICTO ───────────────────────────────────────────
     st.markdown(
-        f"<div style='background:linear-gradient(135deg, {verdict_color}22 0%, #1e1e2e 100%);"
-        f"border-left:5px solid {verdict_color};padding:20px;border-radius:8px;margin:16px 0'>"
-        f"<div style='font-size:28px;font-weight:bold;color:{verdict_color}'>{verdict}</div>"
-        f"<div style='font-size:14px;color:#888;margin-bottom:8px'>{verdict_lvl} — Score: "
-        f"<b style='color:#f8f8f2'>{score_global:.0f}/100</b></div>"
-        f"<div style='font-size:14px;color:#ddd;margin-top:10px;line-height:1.5'>{narrative}</div>"
+        f"<div style='background:#1a1a2e;"
+        f"border-left:5px solid {verdict_color};padding:20px;border-radius:8px;margin:16px 0;"
+        f"box-shadow:0 2px 8px rgba(0,0,0,0.3)'>"
+        f"<div style='font-size:28px;font-weight:bold;color:{verdict_color};text-shadow:0 1px 2px rgba(0,0,0,0.5)'>{verdict}</div>"
+        f"<div style='font-size:14px;color:#bbb;margin-bottom:8px'>{verdict_lvl} — Score: "
+        f"<b style='color:#ffffff'>{score_global:.0f}/100</b></div>"
+        f"<div style='font-size:14px;color:#e8e8e8;margin-top:10px;line-height:1.6'>{narrative}</div>"
         f"</div>",
         unsafe_allow_html=True
     )
@@ -3116,15 +3117,15 @@ elif pagina == "📈 Análisis Individual":
 
                 pct = dim_score
                 st.markdown(
-                    f"<div style='margin-bottom:10px'>"
-                    f"<div style='display:flex;justify-content:space-between;margin-bottom:4px'>"
-                    f"<span style='color:#f8f8f2;font-weight:bold'>{dim_name}</span>"
-                    f"<span style='color:{bar_color};font-weight:bold'>{dim_score:.0f}/100</span>"
+                    f"<div style='margin-bottom:14px;background:#1a1a2e;padding:10px;border-radius:6px'>"
+                    f"<div style='display:flex;justify-content:space-between;margin-bottom:6px'>"
+                    f"<span style='color:#ffffff;font-weight:bold;font-size:14px'>{dim_name}</span>"
+                    f"<span style='color:{bar_color};font-weight:bold;font-size:14px'>{dim_score:.0f}/100</span>"
                     f"</div>"
-                    f"<div style='background:#1e1e2e;border-radius:4px;height:8px;overflow:hidden'>"
+                    f"<div style='background:#0d0d1a;border-radius:4px;height:8px;overflow:hidden'>"
                     f"<div style='background:{bar_color};width:{pct}%;height:100%'></div>"
                     f"</div>"
-                    f"<div style='font-size:11px;color:#888;margin-top:3px'>{dim_note}</div>"
+                    f"<div style='font-size:12px;color:#bbb;margin-top:6px'>{dim_note}</div>"
                     f"</div>",
                     unsafe_allow_html=True
                 )
@@ -3154,46 +3155,55 @@ elif pagina == "📈 Análisis Individual":
 
             with col_n1:
                 st.markdown("**🟢 Entradas**")
-                st.markdown(f"<div style='background:#1e3a1e;padding:8px;border-radius:4px;margin-bottom:6px'>"
-                            f"<b>Óptima:</b> {entrada_optima:.2f} {moneda}<br>"
-                            f"<span style='font-size:11px;color:#888'>Test de MA50 ({((entrada_optima/precio-1)*100):+.1f}%)</span>"
+                st.markdown(f"<div style='background:#1e3a1e;padding:10px;border-radius:6px;margin-bottom:8px;border-left:3px solid #50fa7b'>"
+                            f"<div style='color:#50fa7b;font-weight:bold;font-size:13px;margin-bottom:4px'>🟢 Óptima</div>"
+                            f"<div style='color:#ffffff;font-size:16px;font-weight:bold'>{entrada_optima:.2f} {moneda}</div>"
+                            f"<div style='font-size:11px;color:#bbb;margin-top:4px'>Test de MA50 ({((entrada_optima/precio-1)*100):+.1f}%)</div>"
                             f"</div>", unsafe_allow_html=True)
-                st.markdown(f"<div style='background:#1e2e1e;padding:8px;border-radius:4px'>"
-                            f"<b>Agresiva:</b> {entrada_agresiva:.2f} {moneda}<br>"
-                            f"<span style='font-size:11px;color:#888'>Precio actual</span>"
+                st.markdown(f"<div style='background:#1e2e2a;padding:10px;border-radius:6px;border-left:3px solid #8be9fd'>"
+                            f"<div style='color:#8be9fd;font-weight:bold;font-size:13px;margin-bottom:4px'>🟢 Agresiva</div>"
+                            f"<div style='color:#ffffff;font-size:16px;font-weight:bold'>{entrada_agresiva:.2f} {moneda}</div>"
+                            f"<div style='font-size:11px;color:#bbb;margin-top:4px'>Precio actual</div>"
                             f"</div>", unsafe_allow_html=True)
 
             with col_n2:
                 st.markdown("**🛑 Stop loss**")
                 stop_pct = (stop_loss/precio - 1)*100
-                st.markdown(f"<div style='background:#3a1e1e;padding:8px;border-radius:4px'>"
-                            f"<b>{stop_loss:.2f} {moneda}</b><br>"
-                            f"<span style='font-size:11px;color:#888'>{stop_pct:+.1f}% (2× ATR)</span>"
+                st.markdown(f"<div style='background:#3a1e1e;padding:10px;border-radius:6px;border-left:3px solid #ff5555'>"
+                            f"<div style='color:#ff5555;font-weight:bold;font-size:13px;margin-bottom:4px'>🛑 Stop loss</div>"
+                            f"<div style='color:#ffffff;font-size:16px;font-weight:bold'>{stop_loss:.2f} {moneda}</div>"
+                            f"<div style='font-size:11px;color:#bbb;margin-top:4px'>{stop_pct:+.1f}% (2× ATR)</div>"
                             f"</div>", unsafe_allow_html=True)
 
-                st.markdown(f"<div style='background:#1e1e2e;padding:8px;border-radius:4px;margin-top:10px'>"
-                            f"<b>R/R Ratio: {rr_ratio:.1f}</b><br>"
-                            f"<span style='font-size:11px;color:#888'>"
-                            f"{'✅ Favorable' if rr_ratio >= 2 else '⚠️ Bajo' if rr_ratio < 1.5 else '🟡 Aceptable'}"
-                            f"</span></div>", unsafe_allow_html=True)
+                rr_color = '#50fa7b' if rr_ratio >= 2 else '#ffb86c' if rr_ratio < 1.5 else '#f1fa8c'
+                rr_label = '✅ Favorable' if rr_ratio >= 2 else '⚠️ Bajo' if rr_ratio < 1.5 else '🟡 Aceptable'
+                st.markdown(f"<div style='background:#1a1a2e;padding:10px;border-radius:6px;margin-top:10px;border-left:3px solid {rr_color}'>"
+                            f"<div style='color:{rr_color};font-weight:bold;font-size:13px;margin-bottom:4px'>R/R Ratio</div>"
+                            f"<div style='color:#ffffff;font-size:16px;font-weight:bold'>{rr_ratio:.1f}</div>"
+                            f"<div style='font-size:11px;color:#bbb;margin-top:4px'>{rr_label}</div>"
+                            f"</div>", unsafe_allow_html=True)
 
             with col_n3:
                 st.markdown("**🎯 Objetivos**")
                 obj1_pct = (objetivo_1/precio - 1)*100
                 obj2_pct = (objetivo_2/precio - 1)*100
-                st.markdown(f"<div style='background:#1e3a1e;padding:8px;border-radius:4px;margin-bottom:6px'>"
-                            f"<b>TP1:</b> {objetivo_1:.2f} ({obj1_pct:+.1f}%)<br>"
-                            f"<span style='font-size:11px;color:#888'>R/R 2:1</span>"
+                st.markdown(f"<div style='background:#1e3a1e;padding:10px;border-radius:6px;margin-bottom:8px;border-left:3px solid #50fa7b'>"
+                            f"<div style='color:#50fa7b;font-weight:bold;font-size:13px;margin-bottom:4px'>🎯 TP1</div>"
+                            f"<div style='color:#ffffff;font-size:16px;font-weight:bold'>{objetivo_1:.2f} <span style='color:#50fa7b'>({obj1_pct:+.1f}%)</span></div>"
+                            f"<div style='font-size:11px;color:#bbb;margin-top:4px'>R/R 2:1</div>"
                             f"</div>", unsafe_allow_html=True)
-                st.markdown(f"<div style='background:#1e3a1e;padding:8px;border-radius:4px'>"
-                            f"<b>TP2:</b> {objetivo_2:.2f} ({obj2_pct:+.1f}%)<br>"
-                            f"<span style='font-size:11px;color:#888'>R/R 4:1</span>"
+                st.markdown(f"<div style='background:#1e3a1e;padding:10px;border-radius:6px;margin-bottom:8px;border-left:3px solid #50fa7b'>"
+                            f"<div style='color:#50fa7b;font-weight:bold;font-size:13px;margin-bottom:4px'>🎯 TP2</div>"
+                            f"<div style='color:#ffffff;font-size:16px;font-weight:bold'>{objetivo_2:.2f} <span style='color:#50fa7b'>({obj2_pct:+.1f}%)</span></div>"
+                            f"<div style='font-size:11px;color:#bbb;margin-top:4px'>R/R 4:1</div>"
                             f"</div>", unsafe_allow_html=True)
                 if target_consenso:
                     tc_pct = (target_consenso/precio - 1)*100
-                    st.markdown(f"<div style='background:#1e2e3a;padding:8px;border-radius:4px;margin-top:6px'>"
-                                f"<b>TP Analistas:</b> {target_consenso:.2f} ({tc_pct:+.1f}%)<br>"
-                                f"<span style='font-size:11px;color:#888'>Consenso</span>"
+                    tc_color = '#50fa7b' if tc_pct > 0 else '#ff5555'
+                    st.markdown(f"<div style='background:#1e2e3a;padding:10px;border-radius:6px;border-left:3px solid #8be9fd'>"
+                                f"<div style='color:#8be9fd;font-weight:bold;font-size:13px;margin-bottom:4px'>📊 TP Analistas</div>"
+                                f"<div style='color:#ffffff;font-size:16px;font-weight:bold'>{target_consenso:.2f} <span style='color:{tc_color}'>({tc_pct:+.1f}%)</span></div>"
+                                f"<div style='font-size:11px;color:#bbb;margin-top:4px'>Consenso</div>"
                                 f"</div>", unsafe_allow_html=True)
         else:
             st.info("No hay suficientes datos para calcular niveles operativos")
