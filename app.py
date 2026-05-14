@@ -1,12 +1,12 @@
-"""
+“””
 TFM — PLATAFORMA DE INVERSIÓN INTELIGENTE v4
 Master IA Sector Financiero — VIU 2025/26
 
 Novedades v4:
 · FMP (Financial Modeling Prep) como 3ª fuente de datos — mejora cobertura no-US
 · Renta Fija vía ETF proxy — curva tipos, spreads, duración
-· Diversificación sectorial en Cartera con 3 perfiles: Agresivo / Neutro /
-"""
+· Diversificación sectorial en Cartera con 3 perfiles: Agresivo / Neutro / Balanceado
+“””
 
 import os
 import json
