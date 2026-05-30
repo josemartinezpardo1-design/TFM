@@ -1253,6 +1253,8 @@ def watchlist_add(ticker, precio_inicial, nota=""):
     """
     Añade un ticker a la watchlist.
     Si precio_inicial es 0 o None, intenta obtenerlo del histórico antes de guardar.
+    El precio se guarda como STRING con formato US (punto decimal) para evitar
+    interpretación regional incorrecta de Google Sheets.
     Retorna True si tuvo éxito, False si ya existía o falló.
     """
     ws = get_watchlist_ws()
@@ -1263,7 +1265,7 @@ def watchlist_add(ticker, precio_inicial, nota=""):
         if ticker.upper() in df["ticker"].astype(str).str.upper().values:
             return False  # ya existe
 
-        # Validar precio: si es 0 o None, intentar recuperarlo del histórico
+        # Validar precio
         try:
             p_check = float(precio_inicial) if precio_inicial else 0
         except Exception:
@@ -1279,7 +1281,6 @@ def watchlist_add(ticker, precio_inicial, nota=""):
                 pass
 
         if p_check <= 0:
-            # Si ni así obtenemos precio, no guardamos para evitar datos sucios
             st.session_state["_watchlist_last_error"] = (
                 f"No se pudo obtener precio inicial para {ticker.upper()}. "
                 f"No se añadió a watchlist."
@@ -1287,7 +1288,13 @@ def watchlist_add(ticker, precio_inicial, nota=""):
             return False
 
         fecha = datetime.now().strftime("%Y-%m-%d")
-        ws.append_row([fecha, ticker.upper(), float(p_check), str(nota)])
+        # CRÍTICO: guardar como STRING con punto para evitar conversión regional
+        precio_str = f"{p_check:.4f}"  # ej: "90.1700"
+
+        ws.append_row(
+            [fecha, ticker.upper(), precio_str, str(nota)],
+            value_input_option="USER_ENTERED"  # respeta el formato del string
+        )
         return True
     except Exception as e:
         st.error(f"Error guardando en Sheets: {e}")
@@ -1325,8 +1332,10 @@ def watchlist_clear():
 
 def watchlist_reparar_precios():
     """
-    Recorre la watchlist y para cada ticker con precio_inicial=0 o vacío
-    descarga el precio histórico de la fecha_anadido y lo actualiza en Sheets.
+    Recorre la watchlist y repara precios inválidos:
+    - precio_inicial = 0 o vacío
+    - precio_inicial es un entero enorme (>10000) por bug de conversión regional de Sheets
+    Descarga el precio histórico real de la fecha_anadido y lo guarda como STRING US.
     Retorna (n_reparados, n_total, errores).
     """
     ws = get_watchlist_ws()
@@ -1340,44 +1349,60 @@ def watchlist_reparar_precios():
 
         n_reparados = 0
         errores = []
-        # Filas a procesar (skip header). Indice de Sheets es 1-based
         for i, row in enumerate(all_vals[1:], start=2):
             if len(row) < 4:
                 continue
             fecha_alta, ticker, precio_str, nota = row[0], row[1], row[2], row[3]
 
-            # ¿Precio inválido?
+            # Detectar precio inválido
             try:
                 precio_val = float(precio_str) if precio_str else 0
             except Exception:
                 precio_val = 0
 
-            if precio_val > 0:
-                continue  # ya tiene precio válido
+            # 3 casos a reparar:
+            #   1) precio <= 0           → falta el dato
+            #   2) precio > 10000        → bug regional (Google Sheets convirtió 90.17 a 9017000000 o similar)
+            #   3) precio > 5000 y no es BRK (Berkshire ~600k legítimo) → sospechoso
+            necesita_reparar = (
+                precio_val <= 0
+                or precio_val > 10000  # ningún ticker normal cuesta >10k (excepto BRK)
+            )
 
-            # Descargar histórico y buscar el cierre del día de alta
+            # Excepción: Berkshire Hathaway Class A legítimamente >500k
+            if ticker.upper() in ("BRK.A", "BRK-A") and 100000 < precio_val < 1000000:
+                necesita_reparar = False
+
+            if not necesita_reparar:
+                continue
+
+            # Descargar histórico real
             try:
                 t_yf = yf.Ticker(ticker)
-                # Descargar 1 año atrás desde hoy para tener cobertura
                 h = t_yf.history(period="1y", auto_adjust=True)
                 if h.empty:
                     errores.append(f"{ticker}: sin datos históricos")
                     continue
 
                 f_alta = pd.to_datetime(fecha_alta)
-                # Tomar el cierre del día más cercano (igual o anterior) a fecha_alta
                 h_filtrado = h[h.index.date <= f_alta.date()]
                 if h_filtrado.empty:
-                    # fecha de alta anterior al histórico disponible — usar el primero
                     precio_inicial = float(h["Close"].iloc[0])
                 else:
                     precio_inicial = float(h_filtrado["Close"].iloc[-1])
 
-                # Actualizar columna C (precio_inicial) de la fila i
-                ws.update_cell(i, 3, precio_inicial)
+                # CRÍTICO: escribir como STRING con formato US para evitar bug regional
+                precio_str_us = f"{precio_inicial:.4f}"
+
+                # Actualizar columna C (índice 3) con value_input_option USER_ENTERED
+                ws.update(
+                    range_name=f"C{i}",
+                    values=[[precio_str_us]],
+                    value_input_option="USER_ENTERED"
+                )
                 n_reparados += 1
             except Exception as e:
-                errores.append(f"{ticker}: {str(e)[:60]}")
+                errores.append(f"{ticker}: {str(e)[:80]}")
 
         return n_reparados, len(all_vals) - 1, errores
     except Exception as e:
@@ -3055,15 +3080,19 @@ elif pagina == "⭐ Watchlist":
 
     # ── AUTO-REPARACIÓN: si hay precios inválidos, los arregla en segundo plano ──
     if not df_wl_db.empty:
-        # Detectar filas con precio_inicial faltante o 0
+        # Detectar filas con precio_inicial faltante, 0, o enorme (bug regional)
         precios_invalidos = 0
         try:
             for _, row_chk in df_wl_db.iterrows():
                 try:
                     p_chk = float(row_chk["precio_inicial"]) if row_chk["precio_inicial"] else 0
-                    if p_chk <= 0:
-                        precios_invalidos += 1
                 except Exception:
+                    p_chk = 0
+                ticker_chk = str(row_chk.get("ticker", "")).upper()
+                # Inválido si <= 0 o > 10000 (salvo Berkshire)
+                if p_chk <= 0:
+                    precios_invalidos += 1
+                elif p_chk > 10000 and ticker_chk not in ("BRK.A", "BRK-A"):
                     precios_invalidos += 1
         except Exception:
             pass
@@ -3224,6 +3253,11 @@ elif pagina == "⭐ Watchlist":
                     precio_alta = float(raw)
                 # Validar que el valor es sensato
                 if precio_alta is not None and precio_alta <= 0:
+                    precio_alta = None
+                # Defensa contra bug regional: si el precio es absurdamente grande, descartar
+                # (BRK.A es la única excepción legítima >10000)
+                if (precio_alta is not None and precio_alta > 10000
+                    and t.upper() not in ("BRK.A", "BRK-A")):
                     precio_alta = None
         except Exception:
             precio_alta = None
