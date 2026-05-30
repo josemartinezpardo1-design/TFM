@@ -3194,12 +3194,39 @@ elif pagina == "⭐ Watchlist":
         st.warning("No se pudieron obtener datos. Pulsa Actualizar.")
         st.stop()
 
+    # ── DIAGNÓSTICO: ver datos crudos de Sheets ─────────────────
+    with st.expander("🔬 Diagnóstico: ver datos crudos de Sheets", expanded=False):
+        st.write("**Contenido tal cual viene de Google Sheets:**")
+        st.dataframe(df_wl_db, use_container_width=True, hide_index=True)
+        st.write("**Tipos de datos por columna:**")
+        st.write(df_wl_db.dtypes.astype(str).to_dict())
+        st.write("**Valores únicos de `precio_inicial`:**")
+        for v in df_wl_db["precio_inicial"].tolist():
+            st.write(f"   • valor: `{v!r}`  tipo: `{type(v).__name__}`")
+
     # ── Construir tabla de tracking ──────────────────────────────
     rows = []
     for _, row_db in df_wl_db.iterrows():
         t          = row_db["ticker"]
         d_alta_str = row_db["fecha_anadido"]
-        precio_alta = float(row_db["precio_inicial"]) if row_db["precio_inicial"] else None
+
+        # Parser ROBUSTO de precio_inicial — maneja strings, comas decimales, etc.
+        precio_alta = None
+        try:
+            raw = row_db["precio_inicial"]
+            if raw is not None and raw != "" and not pd.isna(raw):
+                # Si es string, normalizar (sustituir coma por punto si aplica)
+                if isinstance(raw, str):
+                    raw_clean = raw.strip().replace(",", ".")
+                    if raw_clean:
+                        precio_alta = float(raw_clean)
+                else:
+                    precio_alta = float(raw)
+                # Validar que el valor es sensato
+                if precio_alta is not None and precio_alta <= 0:
+                    precio_alta = None
+        except Exception:
+            precio_alta = None
 
         if t not in wl_data:
             continue
@@ -3251,6 +3278,7 @@ elif pagina == "⭐ Watchlist":
             rows.append({
                 "Ticker":       t,
                 "Precio":       round(precio, 2),
+                "Precio alta":  round(precio_alta, 2) if precio_alta is not None else None,
                 "Hoy %":        round(chg_dia, 2),
                 "Desde alta %": round(ret_alta, 2) if ret_alta is not None else None,
                 "Alpha SPY %":  round(alpha_spy, 2) if alpha_spy is not None else None,
