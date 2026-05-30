@@ -1250,7 +1250,11 @@ def watchlist_load():
         return pd.DataFrame(columns=WATCHLIST_COLS)
 
 def watchlist_add(ticker, precio_inicial, nota=""):
-    """Añade un ticker a la watchlist. Retorna True si tuvo éxito, False si ya existía."""
+    """
+    Añade un ticker a la watchlist.
+    Si precio_inicial es 0 o None, intenta obtenerlo del histórico antes de guardar.
+    Retorna True si tuvo éxito, False si ya existía o falló.
+    """
     ws = get_watchlist_ws()
     if ws is None:
         return False
@@ -1258,8 +1262,32 @@ def watchlist_add(ticker, precio_inicial, nota=""):
         df = watchlist_load()
         if ticker.upper() in df["ticker"].astype(str).str.upper().values:
             return False  # ya existe
+
+        # Validar precio: si es 0 o None, intentar recuperarlo del histórico
+        try:
+            p_check = float(precio_inicial) if precio_inicial else 0
+        except Exception:
+            p_check = 0
+
+        if p_check <= 0:
+            try:
+                t_yf = yf.Ticker(ticker.upper())
+                h_yf = t_yf.history(period="5d", auto_adjust=True)
+                if not h_yf.empty:
+                    p_check = float(h_yf["Close"].iloc[-1])
+            except Exception:
+                pass
+
+        if p_check <= 0:
+            # Si ni así obtenemos precio, no guardamos para evitar datos sucios
+            st.session_state["_watchlist_last_error"] = (
+                f"No se pudo obtener precio inicial para {ticker.upper()}. "
+                f"No se añadió a watchlist."
+            )
+            return False
+
         fecha = datetime.now().strftime("%Y-%m-%d")
-        ws.append_row([fecha, ticker.upper(), float(precio_inicial), str(nota)])
+        ws.append_row([fecha, ticker.upper(), float(p_check), str(nota)])
         return True
     except Exception as e:
         st.error(f"Error guardando en Sheets: {e}")
@@ -1294,6 +1322,68 @@ def watchlist_clear():
         return True
     except Exception:
         return False
+
+def watchlist_reparar_precios():
+    """
+    Recorre la watchlist y para cada ticker con precio_inicial=0 o vacío
+    descarga el precio histórico de la fecha_anadido y lo actualiza en Sheets.
+    Retorna (n_reparados, n_total, errores).
+    """
+    ws = get_watchlist_ws()
+    if ws is None:
+        return 0, 0, ["No conecta con Google Sheets"]
+
+    try:
+        all_vals = ws.get_all_values()
+        if len(all_vals) <= 1:
+            return 0, 0, []
+
+        n_reparados = 0
+        errores = []
+        # Filas a procesar (skip header). Indice de Sheets es 1-based
+        for i, row in enumerate(all_vals[1:], start=2):
+            if len(row) < 4:
+                continue
+            fecha_alta, ticker, precio_str, nota = row[0], row[1], row[2], row[3]
+
+            # ¿Precio inválido?
+            try:
+                precio_val = float(precio_str) if precio_str else 0
+            except Exception:
+                precio_val = 0
+
+            if precio_val > 0:
+                continue  # ya tiene precio válido
+
+            # Descargar histórico y buscar el cierre del día de alta
+            try:
+                t_yf = yf.Ticker(ticker)
+                # Descargar 1 año atrás desde hoy para tener cobertura
+                h = t_yf.history(period="1y", auto_adjust=True)
+                if h.empty:
+                    errores.append(f"{ticker}: sin datos históricos")
+                    continue
+
+                f_alta = pd.to_datetime(fecha_alta)
+                # Tomar el cierre del día más cercano (igual o anterior) a fecha_alta
+                h_filtrado = h[h.index.date <= f_alta.date()]
+                if h_filtrado.empty:
+                    # fecha de alta anterior al histórico disponible — usar el primero
+                    precio_inicial = float(h["Close"].iloc[0])
+                else:
+                    precio_inicial = float(h_filtrado["Close"].iloc[-1])
+
+                # Actualizar columna C (precio_inicial) de la fila i
+                ws.update_cell(i, 3, precio_inicial)
+                n_reparados += 1
+            except Exception as e:
+                errores.append(f"{ticker}: {str(e)[:60]}")
+
+        return n_reparados, len(all_vals) - 1, errores
+    except Exception as e:
+        return 0, 0, [f"Error: {e}"]
+
+
 
 
 INDICES = {
@@ -2962,6 +3052,34 @@ elif pagina == "⭐ Watchlist":
 
     # ── Cargar watchlist desde Google Sheets ─────────────────────
     df_wl_db = watchlist_load()
+
+    # ── AUTO-REPARACIÓN: si hay precios inválidos, los arregla en segundo plano ──
+    if not df_wl_db.empty:
+        # Detectar filas con precio_inicial faltante o 0
+        precios_invalidos = 0
+        try:
+            for _, row_chk in df_wl_db.iterrows():
+                try:
+                    p_chk = float(row_chk["precio_inicial"]) if row_chk["precio_inicial"] else 0
+                    if p_chk <= 0:
+                        precios_invalidos += 1
+                except Exception:
+                    precios_invalidos += 1
+        except Exception:
+            pass
+
+        if precios_invalidos > 0:
+            with st.spinner(f"🔧 Reparando {precios_invalidos} precios faltantes en la watchlist..."):
+                n_ok, _, errs_rep = watchlist_reparar_precios()
+            if n_ok > 0:
+                st.success(f"✅ Auto-reparados {n_ok} precios desde histórico (operación silenciosa)")
+                # Recargar tras la reparación para reflejar los nuevos valores
+                df_wl_db = watchlist_load()
+            elif errs_rep:
+                # Solo mostrar si hubo errores reales
+                with st.expander(f"⚠️ {len(errs_rep)} precios no se pudieron reparar"):
+                    for e in errs_rep:
+                        st.caption(f"• {e}")
 
     # Mostrar error si hubo problema en la carga
     last_err = st.session_state.get("_watchlist_last_error")
