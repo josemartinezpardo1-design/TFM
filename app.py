@@ -465,62 +465,169 @@ def _sf(df, key, col=0, default=0):
         return default
 
 def calc_piotroski(fin, bs, cf):
+    """
+    Piotroski F-Score (0-9). Devuelve (score, detalles).
+    Devuelve (None, {...}) si no hay 2 años de datos para comparaciones YoY.
+    """
     sc = 0; det = {}
+
+    # VALIDACIÓN CRÍTICA: necesitamos al menos 2 columnas (años) en los estados
+    n_cols_fin = fin.shape[1] if (fin is not None and not fin.empty) else 0
+    n_cols_bs  = bs.shape[1]  if (bs  is not None and not bs.empty)  else 0
+    if n_cols_fin < 2 or n_cols_bs < 2:
+        det["_error"] = {"ok": False,
+                         "val": "Datos insuficientes: se necesitan 2 años de estados financieros"}
+        return None, det
+
     try:
-        ta0  = _sf(bs, "Total Assets", 0, 1)
-        ta1  = _sf(bs, "Total Assets", 1, 1)
-        ni0  = _sf(fin, "Net Income", 0)
-        cfo  = _sf(cf, "Operating Cash Flow", 0)
-        ca0  = _sf(bs, "Current Assets", 0)
-        cl0  = _sf(bs, "Current Liabilities", 0) or 1
-        ca1  = _sf(bs, "Current Assets", 1)
-        cl1  = _sf(bs, "Current Liabilities", 1) or 1
-        ltd0 = _sf(bs, "Long Term Debt", 0)
-        ltd1 = _sf(bs, "Long Term Debt", 1)
-        rev0 = _sf(fin, "Total Revenue", 0) or 1
-        rev1 = _sf(fin, "Total Revenue", 1) or 1
-        gp0  = _sf(fin, "Gross Profit", 0)
-        gp1  = _sf(fin, "Gross Profit", 1)
-        ni1  = _sf(fin, "Net Income", 1)
+        # Helper interno: devuelve None (no 0) si el dato falta de verdad
+        def _val(df, key, col):
+            try:
+                if key in df.index:
+                    v = df.loc[key].iloc[col]
+                    return float(v) if not pd.isna(v) else None
+            except Exception:
+                pass
+            return None
+
+        ta0  = _val(bs, "Total Assets", 0)
+        ta1  = _val(bs, "Total Assets", 1)
+        ni0  = _val(fin, "Net Income", 0)
+        ni1  = _val(fin, "Net Income", 1)
+        cfo  = _val(cf, "Operating Cash Flow", 0) if (cf is not None and not cf.empty) else None
+        ca0  = _val(bs, "Current Assets", 0)
+        cl0  = _val(bs, "Current Liabilities", 0)
+        ca1  = _val(bs, "Current Assets", 1)
+        cl1  = _val(bs, "Current Liabilities", 1)
+        ltd0 = _val(bs, "Long Term Debt", 0)
+        ltd1 = _val(bs, "Long Term Debt", 1)
+        rev0 = _val(fin, "Total Revenue", 0)
+        rev1 = _val(fin, "Total Revenue", 1)
+        gp0  = _val(fin, "Gross Profit", 0)
+        gp1  = _val(fin, "Gross Profit", 1)
+        # Acciones en circulación (para dilución real)
+        sh0  = _val(bs, "Share Issued", 0) or _val(bs, "Common Stock", 0) or \
+               _val(bs, "Ordinary Shares Number", 0)
+        sh1  = _val(bs, "Share Issued", 1) or _val(bs, "Common Stock", 1) or \
+               _val(bs, "Ordinary Shares Number", 1)
+
+        # Cada test devuelve (nombre, resultado_o_None, valor_str)
+        # Si algún dato necesario falta, el test devuelve None y NO suma punto
+        def safe_div(a, b):
+            if a is None or b is None or b == 0:
+                return None
+            return a / b
+
+        roa0 = safe_div(ni0, ta0)
+        roa1 = safe_div(ni1, ta1)
+        liq0 = safe_div(ca0, cl0)
+        liq1 = safe_div(ca1, cl1)
+        lev0 = safe_div(ltd0, ta0)
+        lev1 = safe_div(ltd1, ta1)
+        gm0  = safe_div(gp0, rev0)
+        gm1  = safe_div(gp1, rev1)
+        rot0 = safe_div(rev0, ta0)
+        rot1 = safe_div(rev1, ta1)
+
         tests = [
-            ("F1 ROA positivo",  ni0 / ta0 > 0,           f"{ni0/ta0*100:.2f}%"),
-            ("F2 CFO positivo",  cfo > 0,                  f"${cfo/1e6:.0f}M"),
-            ("F3 ROA mejora",    ni0/ta0 > ni1/ta1,        f"{ni0/ta0*100:.2f}% vs {ni1/ta1*100:.2f}%"),
-            ("F4 CFO > NI",      cfo > ni0,                f"CFO {cfo/1e6:.0f}M > NI {ni0/1e6:.0f}M"),
-            ("F5 Menor deuda",   ltd0/ta0 < ltd1/ta1,      f"{ltd0/ta0:.3f} vs {ltd1/ta1:.3f}"),
-            ("F6 Mejor liquidez",ca0/cl0  > ca1/cl1,       f"{ca0/cl0:.2f} vs {ca1/cl1:.2f}"),
-            ("F7 Sin dilución",  True,                     "(manual)"),
-            ("F8 Margen bruto+", gp0/rev0 > gp1/rev1,      f"{gp0/rev0*100:.1f}% vs {gp1/rev1*100:.1f}%"),
-            ("F9 Rot activos+",  rev0/ta0 > rev1/ta1,      f"{rev0/ta0:.3f} vs {rev1/ta1:.3f}"),
+            ("F1 ROA positivo",  (roa0 > 0) if roa0 is not None else None,
+                f"{roa0*100:.2f}%" if roa0 is not None else "sin datos"),
+            ("F2 CFO positivo",  (cfo > 0) if cfo is not None else None,
+                f"${cfo/1e6:.0f}M" if cfo is not None else "sin datos"),
+            ("F3 ROA mejora",    (roa0 > roa1) if (roa0 is not None and roa1 is not None) else None,
+                f"{roa0*100:.2f}% vs {roa1*100:.2f}%" if (roa0 is not None and roa1 is not None) else "sin datos"),
+            ("F4 CFO > NI",      (cfo > ni0) if (cfo is not None and ni0 is not None) else None,
+                f"CFO {cfo/1e6:.0f}M > NI {ni0/1e6:.0f}M" if (cfo is not None and ni0 is not None) else "sin datos"),
+            ("F5 Menor deuda",   (lev0 < lev1) if (lev0 is not None and lev1 is not None) else None,
+                f"{lev0:.3f} vs {lev1:.3f}" if (lev0 is not None and lev1 is not None) else "sin datos"),
+            ("F6 Mejor liquidez",(liq0 > liq1) if (liq0 is not None and liq1 is not None) else None,
+                f"{liq0:.2f} vs {liq1:.2f}" if (liq0 is not None and liq1 is not None) else "sin datos"),
+            ("F7 Sin dilución",  (sh0 <= sh1 * 1.02) if (sh0 is not None and sh1 is not None) else None,
+                f"{sh0/1e6:.0f}M vs {sh1/1e6:.0f}M acc." if (sh0 is not None and sh1 is not None) else "sin datos"),
+            ("F8 Margen bruto+", (gm0 > gm1) if (gm0 is not None and gm1 is not None) else None,
+                f"{gm0*100:.1f}% vs {gm1*100:.1f}%" if (gm0 is not None and gm1 is not None) else "sin datos"),
+            ("F9 Rot activos+",  (rot0 > rot1) if (rot0 is not None and rot1 is not None) else None,
+                f"{rot0:.3f} vs {rot1:.3f}" if (rot0 is not None and rot1 is not None) else "sin datos"),
         ]
+
+        n_evaluables = 0
         for n, c, v in tests:
-            pt = 1 if c else 0
-            sc += pt
-            det[n] = {"ok": bool(c), "val": v}
+            if c is None:
+                det[n] = {"ok": None, "val": v}  # no evaluable
+            else:
+                pt = 1 if c else 0
+                sc += pt
+                n_evaluables += 1
+                det[n] = {"ok": bool(c), "val": v}
+
+        det["_meta"] = {"ok": True, "val": f"{n_evaluables}/9 criterios evaluables"}
     except Exception as e:
         det["_error"] = {"ok": False, "val": str(e)}
+        return None, det
     return sc, det
 
 def calc_altman(info, fin, bs):
+    """
+    Altman Z-Score. Devuelve (z, zona).
+    Devuelve (None, motivo) si faltan componentes clave o si es banco/financiera
+    (el modelo original de 1968 no aplica a entidades financieras).
+    """
     try:
-        ta   = _sf(bs, "Total Assets", 0, 1)
-        ca   = _sf(bs, "Current Assets", 0)
-        cl   = _sf(bs, "Current Liabilities", 0)
-        re   = _sf(bs, "Retained Earnings", 0)
-        ebit = _sf(fin, "EBIT", 0) or _sf(fin, "Operating Income", 0)
-        tl   = _sf(bs, "Total Liabilities Net Minority Interest", 0) or _sf(bs, "Total Debt", 0) or 1
-        rev  = _sf(fin, "Total Revenue", 0)
-        mc   = info.get("marketCap", 0)
-        z    = (1.2 * ((ca - cl) / ta) + 1.4 * (re / ta) + 3.3 * (ebit / ta)
-               + 0.6 * (mc / tl) + 1.0 * (rev / ta))
+        # El Altman Z original NO aplica a bancos/seguros/financieras
+        sector = info.get("sector", "")
+        if sector in ("Financial Services", "Financials"):
+            return None, "No aplica a financieras"
+
+        def _val(df, key, col=0):
+            try:
+                if key in df.index:
+                    v = df.loc[key].iloc[col]
+                    return float(v) if not pd.isna(v) else None
+            except Exception:
+                pass
+            return None
+
+        ta   = _val(bs, "Total Assets")
+        ca   = _val(bs, "Current Assets")
+        cl   = _val(bs, "Current Liabilities")
+        re   = _val(bs, "Retained Earnings")
+        ebit = _val(fin, "EBIT") or _val(fin, "Operating Income")
+        tl   = _val(bs, "Total Liabilities Net Minority Interest") or _val(bs, "Total Debt")
+        rev  = _val(fin, "Total Revenue")
+        mc   = info.get("marketCap")
+
+        # Validar que tenemos los componentes ESENCIALES (no rellenar con 0)
+        faltantes = []
+        if ta is None or ta == 0: faltantes.append("Total Assets")
+        if re is None:            faltantes.append("Retained Earnings")
+        if ebit is None:          faltantes.append("EBIT")
+        if tl is None or tl == 0: faltantes.append("Total Liabilities")
+        if mc is None or mc == 0: faltantes.append("Market Cap")
+        if rev is None:           faltantes.append("Revenue")
+
+        if faltantes:
+            return None, f"Faltan: {', '.join(faltantes[:2])}"
+
+        # Working capital puede ser None si falta ca o cl → usar 0 solo en ese término
+        wc = (ca - cl) if (ca is not None and cl is not None) else 0
+
+        z = (1.2 * (wc / ta) + 1.4 * (re / ta) + 3.3 * (ebit / ta)
+             + 0.6 * (mc / tl) + 1.0 * (rev / ta))
         zona = "🟢 SEGURA" if z > 2.99 else ("🟡 GRIS" if z > 1.81 else "🔴 PELIGRO")
         return round(z, 2), zona
     except Exception:
-        return None, "Sin datos"
+        return None, "Error de cálculo"
 
 def calc_graham(info):
+    """
+    Número de Graham = sqrt(22.5 * EPS * BookValue).
+    Prioriza EPS trailing (real) sobre forward (estimado).
+    Devuelve None si falta EPS o BookValue, o si son negativos.
+    """
     try:
-        eps = info.get("trailingEps") or info.get("forwardEps")
+        eps = info.get("trailingEps")  # preferir trailing (dato real)
+        if eps is None:
+            eps = info.get("forwardEps")  # fallback a estimado
         bv  = info.get("bookValue")
         if eps and bv and eps > 0 and bv > 0:
             return round((22.5 * eps * bv) ** 0.5, 2)
@@ -529,10 +636,20 @@ def calc_graham(info):
     return None
 
 def calc_fcf_yield(info, cf):
+    """
+    FCF Yield = Free Cash Flow / Market Cap * 100.
+    Usa freeCashflow de info si existe; si no, OCF - CapEx.
+    En yfinance, Capital Expenditure ya viene NEGATIVO, así que se SUMA
+    (OCF + CapEx_negativo = OCF - gasto). Usamos abs() para robustez ante
+    fuentes que lo devuelvan positivo.
+    """
     try:
         fcf = info.get("freeCashflow")
-        if not fcf:
-            fcf = _sf(cf, "Operating Cash Flow", 0) - abs(_sf(cf, "Capital Expenditure", 0))
+        if not fcf and cf is not None and not cf.empty:
+            ocf = _sf(cf, "Operating Cash Flow", 0)
+            capex = _sf(cf, "Capital Expenditure", 0)
+            # CapEx es un gasto: restamos su valor absoluto independientemente del signo
+            fcf = ocf - abs(capex)
         mc = info.get("marketCap")
         if fcf and mc and mc > 0:
             return round(fcf / mc * 100, 2)
@@ -1515,60 +1632,122 @@ with st.sidebar:
 # ╚═══════════════════════════════════════════════════════════════╝
 if pagina == "🌅 Outlook":
     st.header("🌅 Resumen Ejecutivo del Mercado")
-    st.markdown("Vista de 30 segundos: estado del mercado, tu watchlist, anomalías recientes y eventos macro de la semana.")
+    st.markdown("Vista de 30 segundos: índices clave, sectores, watchlist, eventos macro y noticias.")
 
     refresh_outlook = st.button("🔄 Actualizar", type="primary")
 
     # ═══════════════════════════════════════════════════════════════
-    # 1. ESTADO DEL MERCADO — métricas clave en una fila
+    # 1. ESTADO DEL MERCADO — métricas + gráficas expandibles
     # ═══════════════════════════════════════════════════════════════
     st.markdown("### 📊 Estado del mercado")
+    st.caption("👉 Pulsa cualquier card para ver el gráfico de los últimos 6 meses")
 
     market_metrics = {
-        "S&P 500":      ("^GSPC",  "📈"),
-        "VIX":          ("^VIX",   "⚡"),
-        "Dólar (DXY)":  ("DX-Y.NYB","💵"),
-        "10Y Treasury": ("^TNX",   "🏦"),
-        "Oro":          ("GC=F",   "🥇"),
-        "Bitcoin":      ("BTC-USD","₿"),
+        "S&P 500":      ("^GSPC",   "📈", "Índice de las 500 mayores empresas de EEUU"),
+        "VIX":          ("^VIX",    "⚡", "Índice de volatilidad — el 'medidor de miedo'"),
+        "Dólar (DXY)":  ("DX-Y.NYB","💵", "Fuerza del dólar vs cesta de divisas"),
+        "10Y Treasury": ("^TNX",    "🏦", "Rendimiento del bono americano a 10 años"),
+        "Oro":          ("GC=F",    "🥇", "Activo refugio por excelencia"),
+        "Bitcoin":      ("BTC-USD", "₿",  "Criptomoneda principal"),
     }
 
     with st.spinner("Descargando datos del mercado..."):
         market_data = {}
-        market_errors = []
-        for nombre, (ticker, emoji) in market_metrics.items():
+        for nombre, (ticker, emoji, desc) in market_metrics.items():
             precio, cambio, err = _get_cambio_dia(ticker)
             if precio is not None and cambio is not None:
                 market_data[nombre] = {
-                    "precio": precio,
-                    "cambio": cambio,
-                    "emoji":  emoji
+                    "precio": precio, "cambio": cambio, "emoji": emoji,
+                    "ticker": ticker, "desc": desc
                 }
-            else:
-                market_errors.append(f"{nombre} ({ticker}): {err}")
 
     if not market_data:
-        st.warning(f"⚠️ No se pudieron obtener datos de mercado. {len(market_errors)} errores:")
-        with st.expander("Detalles del error"):
-            for e in market_errors[:5]:
-                st.caption(e)
-
-    if market_data:
+        st.warning("⚠️ No se pudieron obtener datos de mercado. Reintenta en 1-2 minutos.")
+    else:
         cols_market = st.columns(len(market_data))
         for i, (nombre, datos) in enumerate(market_data.items()):
             with cols_market[i]:
                 color = "#50fa7b" if datos["cambio"] >= 0 else "#ff5555"
                 st.markdown(f"""
-                <div style="background:#1e1e2e;padding:14px;border-radius:8px;text-align:center;border-left:3px solid {color}">
-                  <div style="font-size:22px">{datos['emoji']}</div>
-                  <div style="font-size:12px;color:#888;margin-top:4px">{nombre}</div>
-                  <div style="font-size:18px;font-weight:bold;color:#f8f8f2;margin-top:4px">{datos['precio']:.2f}</div>
-                  <div style="font-size:13px;color:{color};margin-top:2px">{datos['cambio']:+.2f}%</div>
+                <div style="background:#1e1e2e;padding:10px 8px;border-radius:8px;text-align:center;border-left:3px solid {color};min-height:95px">
+                  <div style="font-size:20px">{datos['emoji']}</div>
+                  <div style="font-size:10px;color:#bbb;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{nombre}</div>
+                  <div style="font-size:15px;font-weight:bold;color:#ffffff;margin-top:3px">{datos['precio']:.2f}</div>
+                  <div style="font-size:12px;color:{color};margin-top:2px;font-weight:bold">{datos['cambio']:+.2f}%</div>
                 </div>
                 """, unsafe_allow_html=True)
 
-    # ── Sectores líderes/débiles del día (ETFs sectoriales) ─────────
-    st.markdown("#### 🏭 Sectores hoy")
+        # Selector de índice para ver gráfico
+        sel_idx = st.selectbox(
+            "📊 Ver gráfico detallado:",
+            options=["— Selecciona un índice —"] + list(market_data.keys()),
+            key="outlook_idx_chart"
+        )
+
+        if sel_idx != "— Selecciona un índice —":
+            datos_sel = market_data[sel_idx]
+            with st.spinner(f"Cargando gráfico de {sel_idx}..."):
+                hist_idx, _ = descargar(datos_sel["ticker"], "6mo")
+
+            if not hist_idx.empty:
+                st.caption(f"💡 {datos_sel['desc']}")
+
+                fig_idx = go.Figure()
+                # Línea de precio con fill
+                fig_idx.add_trace(go.Scatter(
+                    x=hist_idx.index, y=hist_idx["Close"],
+                    mode="lines", name=sel_idx,
+                    line=dict(color="#8be9fd", width=2.5),
+                    fill="tozeroy",
+                    fillcolor="rgba(139,233,253,0.08)",
+                    hovertemplate=f"{sel_idx}: %{{y:.2f}}<extra></extra>"
+                ))
+                # MA50 si hay suficientes datos
+                if len(hist_idx) >= 50:
+                    ma50_idx = hist_idx["Close"].rolling(50).mean()
+                    fig_idx.add_trace(go.Scatter(
+                        x=hist_idx.index, y=ma50_idx,
+                        mode="lines", name="MA50",
+                        line=dict(color="#ff79c6", width=1.5, dash="dot"),
+                        hovertemplate="MA50: %{y:.2f}<extra></extra>"
+                    ))
+
+                fig_idx.update_layout(
+                    template="plotly_dark",
+                    paper_bgcolor="#12121f", plot_bgcolor="#12121f",
+                    height=380,
+                    margin=dict(l=10, r=10, t=30, b=10),
+                    hovermode="x unified",
+                    yaxis=dict(side="right", gridcolor="rgba(255,255,255,0.05)",
+                               tickfont=dict(color="#bbb")),
+                    xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                xanchor="center", x=0.5,
+                                bgcolor="rgba(0,0,0,0)",
+                                font=dict(size=11, color="#bbb"))
+                )
+                st.plotly_chart(fig_idx, use_container_width=True,
+                                config={"displayModeBar": False})
+
+                # Métricas adicionales del índice
+                colm1, colm2, colm3, colm4 = st.columns(4)
+                precio_6m_ago = float(hist_idx["Close"].iloc[0])
+                precio_act    = float(hist_idx["Close"].iloc[-1])
+                ret_6m = (precio_act/precio_6m_ago - 1) * 100
+                high_6m = float(hist_idx["High"].max() if "High" in hist_idx.columns else hist_idx["Close"].max())
+                low_6m  = float(hist_idx["Low"].min()  if "Low"  in hist_idx.columns else hist_idx["Close"].min())
+                pos_6m  = ((precio_act - low_6m) / (high_6m - low_6m) * 100) if high_6m > low_6m else 50
+                colm1.metric("Retorno 6M", f"{ret_6m:+.2f}%")
+                colm2.metric("Máx 6M", f"{high_6m:.2f}")
+                colm3.metric("Mín 6M", f"{low_6m:.2f}")
+                colm4.metric("Pos. en rango", f"{pos_6m:.0f}%")
+
+    st.divider()
+
+    # ═══════════════════════════════════════════════════════════════
+    # 2. SECTORES — Hoy y YTD + drill-down
+    # ═══════════════════════════════════════════════════════════════
+    st.markdown("### 🏭 Sectores")
 
     sector_etfs = {
         "Tecnología":     "XLK",
@@ -1584,36 +1763,172 @@ if pagina == "🌅 Outlook":
         "Comunicación":   "XLC",
     }
 
-    sector_changes = []
-    with st.spinner("Analizando sectores..."):
+    # Top tickers por sector (S&P 500) para el drill-down
+    SECTOR_TICKERS_MAP = {
+        "Tecnología":    ["AAPL","MSFT","NVDA","AVGO","ORCL","CRM","ADBE","AMD","INTC","CSCO","QCOM","TXN","IBM","NOW","PANW"],
+        "Financiero":    ["JPM","BAC","WFC","GS","MS","C","BLK","SCHW","SPGI","AXP","V","MA","PYPL","COF","BX"],
+        "Salud":         ["UNH","JNJ","LLY","PFE","ABBV","MRK","TMO","ABT","DHR","ELV","CVS","BMY","AMGN","GILD","MDT"],
+        "Energía":       ["XOM","CVX","COP","EOG","SLB","MPC","PSX","VLO","OXY","PXD","KMI","WMB","HES","FANG","DVN"],
+        "Consumo Disc.": ["AMZN","TSLA","HD","MCD","NKE","SBUX","BKNG","TJX","LOW","CMG","ABNB","ORLY","MAR","GM","F"],
+        "Consumo Bás.":  ["WMT","PG","KO","PEP","COST","PM","MDLZ","MO","CL","KMB","GIS","KHC","SYY","STZ","HSY"],
+        "Industrial":    ["GE","HON","UNP","UPS","RTX","BA","CAT","DE","LMT","NOC","GD","ETN","ITW","MMM","EMR"],
+        "Utilities":     ["NEE","DUK","SO","D","AEP","SRE","XEL","PCG","ED","EXC","EIX","PEG","WEC","ETR","AWK"],
+        "Materiales":    ["LIN","SHW","ECL","APD","FCX","NEM","DOW","DD","PPG","NUE","CTVA","MLM","ALB","VMC","STLD"],
+        "Inmobiliario":  ["PLD","AMT","EQIX","PSA","O","WELL","CCI","SPG","DLR","SBAC","AVB","EQR","EXR","ARE","VTR"],
+        "Comunicación":  ["GOOGL","META","NFLX","DIS","TMUS","T","VZ","CMCSA","CHTR","WBD","EA","TTWO","DASH","SPOT","ROKU"],
+    }
+
+    # Calcular rendimientos HOY y YTD
+    sector_data = []
+    today_year = datetime.now().year
+    ytd_start  = datetime(today_year, 1, 1).strftime("%Y-%m-%d")
+
+    with st.spinner("Analizando sectores (Hoy y YTD)..."):
         for nombre, ticker in sector_etfs.items():
-            _, chg, _ = _get_cambio_dia(ticker)
-            if chg is not None:
-                sector_changes.append({"Sector": nombre, "Cambio %": round(chg, 2)})
+            try:
+                # YTD: descargar desde 1 enero
+                h_ytd, _ = descargar(ticker, "1y")
+                if h_ytd.empty:
+                    continue
 
-    if sector_changes:
-        df_sect = pd.DataFrame(sector_changes).sort_values("Cambio %", ascending=False)
+                precio_hoy = float(h_ytd["Close"].iloc[-1])
+                cambio_dia = (precio_hoy / float(h_ytd["Close"].iloc[-2]) - 1) * 100 if len(h_ytd) >= 2 else 0
 
-        col_sec1, col_sec2 = st.columns(2)
-        with col_sec1:
-            st.markdown("**🟢 Líderes**")
-            top3 = df_sect.head(3)
-            for _, row in top3.iterrows():
-                st.markdown(f"<div style='padding:8px 12px;background:#1e3a1e;border-radius:6px;margin-bottom:5px;border-left:3px solid #50fa7b'>"
-                            f"<b style='color:#ffffff'>{row['Sector']}</b> <span style='color:#50fa7b;float:right;font-weight:bold'>+{row['Cambio %']:.2f}%</span></div>",
-                            unsafe_allow_html=True)
-        with col_sec2:
-            st.markdown("**🔴 Más débiles**")
-            bot3 = df_sect.tail(3).iloc[::-1]
-            for _, row in bot3.iterrows():
-                st.markdown(f"<div style='padding:8px 12px;background:#3a1e1e;border-radius:6px;margin-bottom:5px;border-left:3px solid #ff5555'>"
-                            f"<b style='color:#ffffff'>{row['Sector']}</b> <span style='color:#ff5555;float:right;font-weight:bold'>{row['Cambio %']:.2f}%</span></div>",
-                            unsafe_allow_html=True)
+                # YTD: buscar primer día del año actual
+                h_ytd_idx = h_ytd[h_ytd.index >= ytd_start]
+                if not h_ytd_idx.empty:
+                    precio_inicio = float(h_ytd_idx["Close"].iloc[0])
+                    ytd = (precio_hoy / precio_inicio - 1) * 100
+                else:
+                    ytd = None
+
+                sector_data.append({
+                    "Sector":   nombre,
+                    "Ticker":   ticker,
+                    "Hoy %":    round(cambio_dia, 2),
+                    "YTD %":    round(ytd, 2) if ytd is not None else None,
+                })
+            except Exception:
+                continue
+
+    if sector_data:
+        df_sect = pd.DataFrame(sector_data)
+
+        # Pestañas: HOY vs YTD
+        tab_hoy, tab_ytd = st.tabs(["📅 Hoy", "📆 YTD (Año a la fecha)"])
+
+        with tab_hoy:
+            df_h = df_sect.sort_values("Hoy %", ascending=False)
+            col_h1, col_h2 = st.columns(2)
+            with col_h1:
+                st.markdown("**🟢 Líderes hoy**")
+                for _, row in df_h.head(3).iterrows():
+                    st.markdown(
+                        f"<div style='padding:8px 12px;background:#1e3a1e;border-radius:6px;"
+                        f"margin-bottom:5px;border-left:3px solid #50fa7b'>"
+                        f"<b style='color:#ffffff'>{row['Sector']}</b>"
+                        f"<span style='color:#50fa7b;float:right;font-weight:bold'>+{row['Hoy %']:.2f}%</span>"
+                        f"</div>", unsafe_allow_html=True)
+            with col_h2:
+                st.markdown("**🔴 Más débiles hoy**")
+                for _, row in df_h.tail(3).iloc[::-1].iterrows():
+                    st.markdown(
+                        f"<div style='padding:8px 12px;background:#3a1e1e;border-radius:6px;"
+                        f"margin-bottom:5px;border-left:3px solid #ff5555'>"
+                        f"<b style='color:#ffffff'>{row['Sector']}</b>"
+                        f"<span style='color:#ff5555;float:right;font-weight:bold'>{row['Hoy %']:.2f}%</span>"
+                        f"</div>", unsafe_allow_html=True)
+
+        with tab_ytd:
+            df_y = df_sect.dropna(subset=["YTD %"]).sort_values("YTD %", ascending=False)
+            if df_y.empty:
+                st.info("Sin datos YTD disponibles aún")
+            else:
+                # Tabla completa con barras
+                fig_ytd = go.Figure()
+                fig_ytd.add_trace(go.Bar(
+                    y=df_y["Sector"],
+                    x=df_y["YTD %"],
+                    orientation="h",
+                    marker=dict(
+                        color=df_y["YTD %"],
+                        colorscale=[[0, "#ff5555"], [0.5, "#f1fa8c"], [1, "#50fa7b"]],
+                        cmid=0,
+                    ),
+                    text=df_y["YTD %"].apply(lambda x: f"{x:+.1f}%"),
+                    textposition="outside",
+                    hovertemplate="<b>%{y}</b><br>YTD: %{x:+.2f}%<extra></extra>"
+                ))
+                fig_ytd.update_layout(
+                    template="plotly_dark",
+                    paper_bgcolor="#12121f", plot_bgcolor="#12121f",
+                    height=400,
+                    margin=dict(l=10, r=50, t=20, b=10),
+                    xaxis=dict(title="Rendimiento YTD %", gridcolor="rgba(255,255,255,0.05)",
+                               tickfont=dict(color="#bbb")),
+                    yaxis=dict(tickfont=dict(color="#ffffff")),
+                    showlegend=False
+                )
+                st.plotly_chart(fig_ytd, use_container_width=True,
+                                config={"displayModeBar": False})
+
+        # ── Drill-down: ver acciones del sector ──────────────────────
+        st.markdown("#### 🔍 Ver acciones de un sector")
+        sel_sector = st.selectbox(
+            "Selecciona un sector para ver sus principales acciones:",
+            options=["— Selecciona —"] + list(sector_etfs.keys()),
+            key="outlook_sec_drill"
+        )
+
+        if sel_sector != "— Selecciona —" and sel_sector in SECTOR_TICKERS_MAP:
+            sec_tickers = SECTOR_TICKERS_MAP[sel_sector]
+            st.caption(f"Top {len(sec_tickers)} acciones del sector **{sel_sector}** (S&P 500)")
+
+            with st.spinner(f"Cargando {len(sec_tickers)} acciones..."):
+                try:
+                    bulk = yf.download(sec_tickers, period="5d",
+                                        auto_adjust=True, progress=False)
+                    rows_sec = []
+                    if isinstance(bulk.columns, pd.MultiIndex):
+                        for t in sec_tickers:
+                            try:
+                                if t in bulk.columns.get_level_values(1):
+                                    c = bulk["Close"][t].dropna()
+                                    if len(c) >= 2:
+                                        precio_t = float(c.iloc[-1])
+                                        cambio_t = (precio_t / float(c.iloc[-2]) - 1) * 100
+                                        rows_sec.append({
+                                            "Ticker": t,
+                                            "Precio": round(precio_t, 2),
+                                            "Hoy %":  round(cambio_t, 2),
+                                        })
+                            except Exception:
+                                continue
+
+                    if rows_sec:
+                        df_sec_drill = pd.DataFrame(rows_sec).sort_values("Hoy %", ascending=False)
+
+                        # Métricas resumen
+                        n_up = int((df_sec_drill["Hoy %"] > 0).sum())
+                        avg_chg = df_sec_drill["Hoy %"].mean()
+                        col_s1, col_s2, col_s3 = st.columns(3)
+                        col_s1.metric("Acciones subiendo", f"{n_up}/{len(df_sec_drill)}")
+                        col_s2.metric("Cambio medio", f"{avg_chg:+.2f}%")
+                        col_s3.metric("Mejor", f"{df_sec_drill['Ticker'].iloc[0]} ({df_sec_drill['Hoy %'].iloc[0]:+.1f}%)")
+
+                        st.dataframe(
+                            df_sec_drill.style.map(_color_pct, subset=["Hoy %"]),
+                            use_container_width=True, hide_index=True, height=400
+                        )
+                    else:
+                        st.warning("No se pudieron cargar las acciones del sector")
+                except Exception as e:
+                    st.error(f"Error: {e}")
 
     st.divider()
 
     # ═══════════════════════════════════════════════════════════════
-    # 2. TU WATCHLIST RESUMIDA
+    # 3. WATCHLIST — Performance real desde la fecha de alta
     # ═══════════════════════════════════════════════════════════════
     st.markdown("### ⭐ Tu watchlist")
 
@@ -1624,226 +1939,209 @@ if pagina == "🌅 Outlook":
         with st.spinner(f"Cargando {len(df_wl_o)} tickers..."):
             try:
                 tickers_wl = df_wl_o["ticker"].tolist()
-
+                # Descargar 6 meses para tener historial desde el alta de cualquier ticker
                 if len(tickers_wl) == 1:
-                    h_t, _ = descargar(tickers_wl[0], "5d")
-                    closes_dict = {tickers_wl[0]: h_t["Close"]} if not h_t.empty else {}
+                    h_t, _ = descargar(tickers_wl[0], "6mo")
+                    hist_dict = {tickers_wl[0]: h_t} if not h_t.empty else {}
                 else:
-                    bulk = yf.download(tickers_wl, period="5d",
+                    bulk = yf.download(tickers_wl, period="6mo",
                                        auto_adjust=True, progress=False)
-                    closes_dict = {}
+                    hist_dict = {}
                     if isinstance(bulk.columns, pd.MultiIndex):
                         for t in tickers_wl:
                             if t in bulk.columns.get_level_values(1):
                                 c = bulk["Close"][t].dropna()
                                 if not c.empty:
-                                    closes_dict[t] = c
+                                    hist_dict[t] = pd.DataFrame({"Close": c})
 
                 wl_rows = []
                 for _, row_db in df_wl_o.iterrows():
                     t = row_db["ticker"]
-                    if t not in closes_dict: continue
-                    c = closes_dict[t]
-                    if len(c) < 2: continue
-                    precio = float(c.iloc[-1])
-                    chg    = (precio / float(c.iloc[-2]) - 1) * 100
-                    ret_alta = None
+                    if t not in hist_dict: continue
+                    h_t = hist_dict[t]
+                    if h_t.empty or len(h_t) < 2: continue
+
+                    precio_hoy = float(h_t["Close"].iloc[-1])
+                    cambio_dia = (precio_hoy / float(h_t["Close"].iloc[-2]) - 1) * 100
+
+                    # PRECIO Y FECHA DE ALTA (datos reales guardados en Sheets)
                     try:
-                        p_inicial = float(row_db["precio_inicial"])
-                        if p_inicial > 0:
-                            ret_alta = (precio / p_inicial - 1) * 100
+                        precio_alta = float(row_db["precio_inicial"])
+                    except Exception:
+                        precio_alta = None
+
+                    fecha_alta_str = row_db["fecha_anadido"]
+                    dias_seguido  = None
+                    ret_desde_alta = None
+
+                    if precio_alta and precio_alta > 0:
+                        ret_desde_alta = (precio_hoy / precio_alta - 1) * 100
+
+                    try:
+                        f_alta = datetime.strptime(fecha_alta_str, "%Y-%m-%d")
+                        dias_seguido = (datetime.now() - f_alta).days
                     except Exception:
                         pass
+
                     wl_rows.append({
-                        "Ticker":      t,
-                        "Precio":      round(precio, 2),
-                        "Hoy %":       round(chg, 2),
-                        "Desde alta %": round(ret_alta, 2) if ret_alta is not None else None,
-                        "Alta":        row_db["fecha_anadido"],
+                        "Ticker":        t,
+                        "Precio actual": round(precio_hoy, 2),
+                        "Precio alta":   round(precio_alta, 2) if precio_alta else None,
+                        "Hoy %":         round(cambio_dia, 2),
+                        "Desde alta %":  round(ret_desde_alta, 2) if ret_desde_alta is not None else None,
+                        "Días":          dias_seguido,
+                        "Fecha alta":    fecha_alta_str,
                     })
 
                 if wl_rows:
-                    df_wlo = pd.DataFrame(wl_rows).sort_values("Hoy %", ascending=False)
+                    df_wlo = pd.DataFrame(wl_rows).sort_values("Desde alta %", ascending=False)
 
-                    col_w1, col_w2, col_w3 = st.columns(3)
-                    n_up = int((df_wlo["Hoy %"] > 0).sum())
-                    col_w1.metric("Subiendo hoy", f"{n_up}/{len(df_wlo)}")
+                    col_w1, col_w2, col_w3, col_w4 = st.columns(4)
+                    n_up_hoy = int((df_wlo["Hoy %"] > 0).sum())
+                    col_w1.metric("Subiendo hoy", f"{n_up_hoy}/{len(df_wlo)}")
 
-                    if "Desde alta %" in df_wlo.columns:
-                        winners = df_wlo["Desde alta %"].dropna()
-                        if len(winners) > 0:
-                            col_w2.metric("En verde", f"{int((winners>0).sum())}/{len(winners)}")
-
-                    avg_chg = float(df_wlo["Hoy %"].mean())
-                    col_w3.metric("Cambio medio", f"{avg_chg:+.2f}%")
-
+                    winners = df_wlo["Desde alta %"].dropna()
+                    if len(winners) > 0:
+                        n_win = int((winners > 0).sum())
+                        col_w2.metric("En verde desde alta", f"{n_win}/{len(winners)}")
+                        col_w3.metric("Mejor performer",
+                                      f"{df_wlo['Ticker'].iloc[0]}",
+                                      delta=f"{df_wlo['Desde alta %'].iloc[0]:+.1f}%")
+                        avg_ret = winners.mean()
+                        col_w4.metric("Retorno medio", f"{avg_ret:+.2f}%")
 
                     st.dataframe(
                         df_wlo.style.map(_color_pct,
                             subset=["Hoy %","Desde alta %"]),
                         use_container_width=True, hide_index=True
                     )
+                    st.caption("💡 *'Desde alta %' = retorno desde el día que añadiste el ticker, "
+                               "calculado con precio_inicial guardado en Google Sheets*")
             except Exception as e:
                 st.error(f"Error cargando watchlist: {e}")
 
     st.divider()
 
     # ═══════════════════════════════════════════════════════════════
-    # 3. TOP 3 ANOMALÍAS RECIENTES (de la última ejecución de Descubrimiento)
+    # 4. CALENDARIO MACRO — Mejorado con próximos eventos
     # ═══════════════════════════════════════════════════════════════
-    st.markdown("### 🔎 Anomalías recientes")
-
-    last_disc = st.session_state.get("descubrimiento_resultados", None)
-    if last_disc and len(last_disc) > 0:
-        st.caption(f"De tu última ejecución de Descubrimiento — {len(last_disc)} anomalías totales detectadas")
-
-        top3 = last_disc[:3]
-        for i, r in enumerate(top3, 1):
-            ticker_r  = r["Ticker"]
-            chg_color = "#50fa7b" if r["Cambio %"] > 0 else "#ff5555"
-            ticker_clean = ticker_r.split(".")[0]
-
-            st.markdown(f"""
-            <div style="background:#1e1e2e;border-left:3px solid #8be9fd;padding:12px;margin-bottom:8px;border-radius:4px">
-              <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap">
-                <div>
-                  <span style="font-size:16px;font-weight:bold;color:#f8f8f2">#{i} {ticker_r}</span>
-                  <span style="color:{chg_color};font-weight:bold;margin-left:10px">{r['Cambio %']:+.2f}%</span>
-                  <span style="color:#888;font-size:12px;margin-left:8px">${r['Precio']}</span>
-                </div>
-                <div style="background:#44475a;padding:3px 8px;border-radius:10px;font-size:12px;color:#8be9fd">
-                  Score: {r['Score']}/100
-                </div>
-              </div>
-              <div style="margin-top:6px;font-size:12px;color:#bbb">
-                <b>Señales:</b> {r['Señales']} &nbsp;|&nbsp; Vol×{r['Vol×']}
-              </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        st.caption("💡 Para ver las anomalías completas → ve a **🔎 Descubrimiento**")
-    else:
-        st.info("📋 No has ejecutado **🔎 Descubrimiento** en esta sesión. Ve allí para detectar anomalías del día.")
-
-    st.divider()
-
-    # ═══════════════════════════════════════════════════════════════
-    # 4. CALENDARIO MACRO DE LA SEMANA
-    # ═══════════════════════════════════════════════════════════════
-    st.markdown("### 📅 Calendario macro de la semana")
+    st.markdown("### 📅 Calendario macro")
 
     today        = datetime.now()
-    weekday      = today.weekday()  # 0=lunes, 6=domingo
+    weekday      = today.weekday()
     monday       = today - timedelta(days=weekday)
     nombre_dias  = ["Lunes","Martes","Miércoles","Jueves","Viernes"]
-    week_dates   = [monday + timedelta(days=d) for d in range(5)]
 
-    # Eventos macro hardcoded — ocurrencias mensuales/trimestrales típicas
+    # Calculamos eventos para esta semana Y la próxima (2 semanas en total)
+    week_dates = [monday + timedelta(days=d) for d in range(14)]  # 2 semanas
+
+    def es_primer_viernes(fecha):
+        return fecha.weekday() == 4 and fecha.day <= 7
+
     eventos_macro = []
     for fecha in week_dates:
         dia_mes  = fecha.day
-        dia_sem  = fecha.weekday()  # 0=lunes ... 4=viernes
+        dia_sem  = fecha.weekday()
 
-        # Primer viernes del mes — Non-Farm Payrolls (US)
-        if dia_sem == 4 and dia_mes <= 7:
-            eventos_macro.append({
-                "fecha":    fecha,
-                "evento":   "📊 Non-Farm Payrolls (US)",
-                "hora":     "14:30 UTC",
-                "impacto":  "🔴 Alto",
-                "desc":     "Datos de empleo no agrícola — clave para la Fed"
-            })
+        if es_primer_viernes(fecha):
+            eventos_macro.append({"fecha":fecha,"evento":"📊 Non-Farm Payrolls (US)",
+                "hora":"14:30 UTC","impacto":"🔴 Alto",
+                "desc":"Empleo no agrícola — clave para la Fed"})
 
-        # Día 10-15: CPI mensual (US, normalmente miércoles o jueves)
         if 10 <= dia_mes <= 15 and dia_sem in [2, 3]:
-            eventos_macro.append({
-                "fecha":    fecha,
-                "evento":   "💰 CPI — Inflación (US)",
-                "hora":     "14:30 UTC",
-                "impacto":  "🔴 Alto",
-                "desc":     "Índice de Precios al Consumo — indicador de inflación"
-            })
+            eventos_macro.append({"fecha":fecha,"evento":"💰 CPI — Inflación (US)",
+                "hora":"14:30 UTC","impacto":"🔴 Alto",
+                "desc":"Índice de Precios al Consumo"})
 
-        # Día 15-20: PPI (Productor)
         if 15 <= dia_mes <= 20 and dia_sem == 3:
-            eventos_macro.append({
-                "fecha":    fecha,
-                "evento":   "🏭 PPI — Inflación productor (US)",
-                "hora":     "14:30 UTC",
-                "impacto":  "🟡 Medio",
-                "desc":     "Precios al productor — anticipa CPI"
-            })
+            eventos_macro.append({"fecha":fecha,"evento":"🏭 PPI — Inflación productor (US)",
+                "hora":"14:30 UTC","impacto":"🟡 Medio",
+                "desc":"Precios al productor — anticipa CPI"})
 
-        # Reuniones FOMC (~cada 6 semanas, miércoles)
-        # Aproximación: si miércoles y día_mes entre 20-25 alguna semana
         if dia_sem == 2 and 20 <= dia_mes <= 25:
-            eventos_macro.append({
-                "fecha":    fecha,
-                "evento":   "🏦 Reunión FOMC (Fed)",
-                "hora":     "20:00 UTC",
-                "impacto":  "🔴 Alto",
-                "desc":     "Decisión de tipos de interés y press conference Powell"
-            })
+            eventos_macro.append({"fecha":fecha,"evento":"🏦 Reunión FOMC (Fed)",
+                "hora":"20:00 UTC","impacto":"🔴 Alto",
+                "desc":"Decisión de tipos + press conference Powell"})
 
-        # Jueves: Jobless Claims (semanal)
         if dia_sem == 3:
-            eventos_macro.append({
-                "fecha":    fecha,
-                "evento":   "👥 Jobless Claims (US)",
-                "hora":     "14:30 UTC",
-                "impacto":  "🟢 Bajo",
-                "desc":     "Solicitudes semanales de subsidio por desempleo"
-            })
+            eventos_macro.append({"fecha":fecha,"evento":"👥 Jobless Claims (US)",
+                "hora":"14:30 UTC","impacto":"🟢 Bajo",
+                "desc":"Solicitudes semanales de subsidio"})
 
-        # ECB suele anunciar tipos jueves cada ~6 semanas (aproximación)
         if dia_sem == 3 and 12 <= dia_mes <= 18:
-            eventos_macro.append({
-                "fecha":    fecha,
-                "evento":   "🇪🇺 BCE — Decisión de tipos",
-                "hora":     "14:15 UTC",
-                "impacto":  "🟡 Medio",
-                "desc":     "Banco Central Europeo — política monetaria EUR"
-            })
+            eventos_macro.append({"fecha":fecha,"evento":"🇪🇺 BCE — Decisión de tipos",
+                "hora":"14:15 UTC","impacto":"🟡 Medio",
+                "desc":"Banco Central Europeo — política EUR"})
 
-        # GDP trimestral (último mes de cada trimestre, día 25-30)
         if today.month in [3, 6, 9, 12] and 25 <= dia_mes <= 30 and dia_sem == 3:
-            eventos_macro.append({
-                "fecha":    fecha,
-                "evento":   "📈 GDP trimestral (US)",
-                "hora":     "14:30 UTC",
-                "impacto":  "🔴 Alto",
-                "desc":     "Producto Interior Bruto — crecimiento de la economía"
-            })
+            eventos_macro.append({"fecha":fecha,"evento":"📈 GDP trimestral (US)",
+                "hora":"14:30 UTC","impacto":"🔴 Alto",
+                "desc":"PIB — crecimiento de la economía"})
 
-    # Mostrar eventos por día
+        # Retail Sales típicamente día 15-17
+        if 15 <= dia_mes <= 17 and dia_sem == 3:
+            eventos_macro.append({"fecha":fecha,"evento":"🛍️ Retail Sales (US)",
+                "hora":"14:30 UTC","impacto":"🟡 Medio",
+                "desc":"Ventas minoristas — consumo doméstico"})
+
+        # PMI primer día hábil de cada mes
+        if dia_mes <= 3 and dia_sem < 5:
+            eventos_macro.append({"fecha":fecha,"evento":"🏭 ISM Manufacturing PMI",
+                "hora":"16:00 UTC","impacto":"🟡 Medio",
+                "desc":"Sentimiento empresarial manufactura"})
+
     if eventos_macro:
         eventos_macro.sort(key=lambda x: x["fecha"])
 
-        for fecha_dia in week_dates:
-            eventos_dia = [e for e in eventos_macro if e["fecha"].date() == fecha_dia.date()]
-            if eventos_dia:
-                dia_label = nombre_dias[fecha_dia.weekday()]
-                fecha_str = fecha_dia.strftime("%d-%m")
-                es_hoy    = fecha_dia.date() == today.date()
-                color_bg  = "#1a3a1a" if es_hoy else "#1e1e2e"
-                marcador  = " 👈 HOY" if es_hoy else ""
+        # Filtros visuales
+        col_filt1, col_filt2 = st.columns([2, 1])
+        with col_filt1:
+            filtro_impacto = st.multiselect(
+                "Filtrar por impacto:",
+                options=["🔴 Alto", "🟡 Medio", "🟢 Bajo"],
+                default=["🔴 Alto", "🟡 Medio"],
+                key="cal_filter"
+            )
+        with col_filt2:
+            vista_cal = st.radio("Vista:", ["Esta semana", "2 semanas"],
+                                  horizontal=True, key="cal_view")
 
-                st.markdown(f"**{dia_label} {fecha_str}**{marcador}")
-                for ev in eventos_dia:
-                    st.markdown(f"""
-                    <div style="background:{color_bg};padding:10px;margin-bottom:6px;border-radius:6px;border-left:3px solid #8be9fd">
-                      <div style="display:flex;justify-content:space-between;flex-wrap:wrap">
-                        <div>
-                          <b style="color:#f8f8f2">{ev['evento']}</b>
-                          <span style="color:#888;font-size:12px;margin-left:6px">{ev['hora']}</span>
+        eventos_filt = [e for e in eventos_macro if e["impacto"] in filtro_impacto]
+        if vista_cal == "Esta semana":
+            limite = monday + timedelta(days=7)
+            eventos_filt = [e for e in eventos_filt if e["fecha"] < limite]
+
+        if not eventos_filt:
+            st.info("📭 Sin eventos para los filtros seleccionados")
+        else:
+            # Agrupar por día
+            for fecha_dia in week_dates:
+                eventos_dia = [e for e in eventos_filt if e["fecha"].date() == fecha_dia.date()]
+                if eventos_dia:
+                    dia_label = nombre_dias[fecha_dia.weekday()] if fecha_dia.weekday() < 5 else fecha_dia.strftime("%A")
+                    fecha_str = fecha_dia.strftime("%d-%m")
+                    es_hoy    = fecha_dia.date() == today.date()
+                    es_pasado = fecha_dia.date() < today.date()
+                    marcador  = " 👈 HOY" if es_hoy else ("  *(pasado)*" if es_pasado else "")
+                    color_bg  = "#1a3a1a" if es_hoy else ("#1a1a1a" if es_pasado else "#1e1e2e")
+                    opacity   = "opacity:0.6" if es_pasado else ""
+
+                    st.markdown(f"**{dia_label} {fecha_str}**{marcador}")
+                    for ev in eventos_dia:
+                        st.markdown(f"""
+                        <div style="background:{color_bg};padding:10px;margin-bottom:6px;border-radius:6px;border-left:3px solid #8be9fd;{opacity}">
+                          <div style="display:flex;justify-content:space-between;flex-wrap:wrap">
+                            <div>
+                              <b style="color:#ffffff">{ev['evento']}</b>
+                              <span style="color:#bbb;font-size:12px;margin-left:6px">{ev['hora']}</span>
+                            </div>
+                            <span style="font-size:12px">{ev['impacto']}</span>
+                          </div>
+                          <div style="font-size:11px;color:#aaa;margin-top:4px">{ev['desc']}</div>
                         </div>
-                        <span style="font-size:12px">{ev['impacto']}</span>
-                      </div>
-                      <div style="font-size:11px;color:#aaa;margin-top:4px">{ev['desc']}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
+                        """, unsafe_allow_html=True)
     else:
-        st.info("📭 No hay eventos macro destacables esta semana — semana relativamente tranquila.")
+        st.info("📭 No hay eventos macro destacables próximamente")
 
     st.caption(
         "ℹ️ Eventos calculados según patrones típicos. Verifica fechas exactas en "
@@ -1854,87 +2152,118 @@ if pagina == "🌅 Outlook":
     st.divider()
 
     # ═══════════════════════════════════════════════════════════════
-    # 5. NOTICIAS — De tu watchlist o generales si está vacía
+    # 5. NOTICIAS — Mercado general + Watchlist (separadas)
     # ═══════════════════════════════════════════════════════════════
-    st.markdown("### 📰 Noticias relevantes")
+    st.markdown("### 📰 Noticias")
 
     if fh_client is None:
-        st.info("📭 Finnhub no configurado — sin noticias disponibles. Configura FINNHUB_KEY en secrets.")
+        st.info("📭 Finnhub no configurado — sin noticias disponibles")
     else:
-        # Determinar de qué tickers traer noticias
-        df_wl_news = watchlist_load() if GSPREAD_AVAILABLE else pd.DataFrame()
+        tab_news_global, tab_news_wl = st.tabs(["🌍 Mercado global", "⭐ De tu watchlist"])
 
-        if not df_wl_news.empty:
-            # Noticias de la watchlist
-            tickers_news = df_wl_news["ticker"].tolist()[:5]  # max 5 tickers
-            st.caption(f"De tus {len(tickers_news)} tickers en watchlist")
-        else:
-            # Noticias generales del mercado: SPY + AAPL + NVDA como proxy
-            tickers_news = ["SPY", "AAPL", "NVDA"]
-            st.caption("Noticias generales del mercado (añade tickers a tu watchlist para personalizar)")
-
-        with st.spinner("Cargando noticias..."):
-            today_str    = datetime.now().strftime("%Y-%m-%d")
-            week_ago_str = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
-
-            todas_noticias = []
-            for t in tickers_news:
+        # ── Noticias del mercado global ─────────────────────────────
+        with tab_news_global:
+            with st.spinner("Cargando noticias generales..."):
                 try:
-                    # Solo tickers US que Finnhub soporta (sin sufijos extranjeros)
-                    if "." in t:
-                        continue
-                    news_items = fh_client.company_news(t, _from=week_ago_str, to=today_str)
-                    if news_items:
-                        for n in news_items[:3]:  # top 3 por ticker
-                            todas_noticias.append({
-                                "ticker":   t,
-                                "fecha":    n.get("datetime", 0),
-                                "fuente":   n.get("source", ""),
-                                "titular":  n.get("headline", ""),
-                                "url":      n.get("url", ""),
-                                "resumen":  n.get("summary", "")[:200],
-                                "imagen":   n.get("image", ""),
-                            })
-                except Exception:
-                    continue
+                    news_general = fh_client.general_news("general", min_id=0)
+                    if news_general:
+                        for n in news_general[:8]:
+                            fecha_n = datetime.fromtimestamp(n.get("datetime", 0)).strftime("%d-%m %H:%M") \
+                                      if n.get("datetime") else ""
+                            categoria = n.get("category", "general").capitalize()
+                            st.markdown(f"""
+                            <div style="background:#1e1e2e;padding:12px;margin-bottom:8px;border-radius:6px;border-left:3px solid #8be9fd">
+                              <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px">
+                                <div>
+                                  <span style="background:#44475a;padding:2px 8px;border-radius:10px;font-size:11px;color:#8be9fd">
+                                    {categoria}
+                                  </span>
+                                  <span style="color:#bbb;font-size:11px;margin-left:6px">
+                                    {n.get('source','')} · {fecha_n}
+                                  </span>
+                                </div>
+                                <a href="{n.get('url','')}" target="_blank" style="color:#8be9fd;font-size:12px;text-decoration:none">
+                                  Leer →
+                                </a>
+                              </div>
+                              <div style="margin-top:6px;font-size:14px;color:#ffffff;font-weight:bold">
+                                {n.get('headline','')}
+                              </div>
+                              <div style="margin-top:4px;font-size:12px;color:#aaa">
+                                {(n.get('summary','') or '')[:200]}{'...' if len(n.get('summary','') or '') >= 200 else ''}
+                              </div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                    else:
+                        st.info("📭 Sin noticias generales disponibles")
+                except Exception as e:
+                    st.error(f"Error: {e}")
 
-            # Ordenar por fecha (más reciente primero) y mostrar top 10
-            todas_noticias.sort(key=lambda x: x["fecha"], reverse=True)
-            todas_noticias = todas_noticias[:10]
+        # ── Noticias de la watchlist ────────────────────────────────
+        with tab_news_wl:
+            df_wl_news = watchlist_load() if GSPREAD_AVAILABLE else pd.DataFrame()
+            if df_wl_news.empty:
+                st.info("📋 Añade tickers a tu watchlist para ver noticias específicas")
+            else:
+                tickers_news = df_wl_news["ticker"].tolist()[:5]
+                tickers_us = [t for t in tickers_news if "." not in t]
 
-        if todas_noticias:
-            for n in todas_noticias:
-                fecha_n = datetime.fromtimestamp(n["fecha"]).strftime("%d-%m %H:%M") if n["fecha"] else ""
-                ticker_clean = n["ticker"].split(".")[0]
+                if not tickers_us:
+                    st.info("ℹ️ Finnhub solo soporta tickers US. Tus tickers actuales son extranjeros.")
+                else:
+                    st.caption(f"Noticias de tus {len(tickers_us)} tickers US en watchlist")
+                    with st.spinner("Cargando noticias..."):
+                        today_str    = datetime.now().strftime("%Y-%m-%d")
+                        week_ago_str = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+                        todas = []
+                        for t in tickers_us:
+                            try:
+                                items = fh_client.company_news(t, _from=week_ago_str, to=today_str)
+                                for n in items[:3]:
+                                    todas.append({
+                                        "ticker":  t,
+                                        "fecha":   n.get("datetime", 0),
+                                        "fuente":  n.get("source", ""),
+                                        "titular": n.get("headline", ""),
+                                        "url":     n.get("url", ""),
+                                        "resumen": (n.get("summary", "") or "")[:200],
+                                    })
+                            except Exception:
+                                continue
 
-                st.markdown(f"""
-                <div style="background:#1e1e2e;padding:12px;margin-bottom:8px;border-radius:6px;border-left:3px solid #ff79c6">
-                  <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px">
-                    <div>
-                      <span style="background:#44475a;padding:2px 8px;border-radius:10px;font-size:11px;color:#8be9fd">
-                        {n['ticker']}
-                      </span>
-                      <span style="color:#888;font-size:11px;margin-left:6px">
-                        {n['fuente']} · {fecha_n}
-                      </span>
-                    </div>
-                    <a href="{n['url']}" target="_blank" style="color:#8be9fd;font-size:12px;text-decoration:none">
-                      Leer →
-                    </a>
-                  </div>
-                  <div style="margin-top:6px;font-size:14px;color:#f8f8f2;font-weight:bold">
-                    {n['titular']}
-                  </div>
-                  <div style="margin-top:4px;font-size:12px;color:#aaa">
-                    {n['resumen']}{'...' if len(n['resumen']) >= 200 else ''}
-                  </div>
-                </div>
-                """, unsafe_allow_html=True)
-        else:
-            st.info("📭 No se han encontrado noticias recientes para los tickers seleccionados.")
+                        todas.sort(key=lambda x: x["fecha"], reverse=True)
+                        todas = todas[:10]
+
+                    if todas:
+                        for n in todas:
+                            fecha_n = datetime.fromtimestamp(n["fecha"]).strftime("%d-%m %H:%M") if n["fecha"] else ""
+                            st.markdown(f"""
+                            <div style="background:#1e1e2e;padding:12px;margin-bottom:8px;border-radius:6px;border-left:3px solid #ff79c6">
+                              <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px">
+                                <div>
+                                  <span style="background:#44475a;padding:2px 8px;border-radius:10px;font-size:11px;color:#8be9fd">
+                                    {n['ticker']}
+                                  </span>
+                                  <span style="color:#bbb;font-size:11px;margin-left:6px">
+                                    {n['fuente']} · {fecha_n}
+                                  </span>
+                                </div>
+                                <a href="{n['url']}" target="_blank" style="color:#8be9fd;font-size:12px;text-decoration:none">
+                                  Leer →
+                                </a>
+                              </div>
+                              <div style="margin-top:6px;font-size:14px;color:#ffffff;font-weight:bold">
+                                {n['titular']}
+                              </div>
+                              <div style="margin-top:4px;font-size:12px;color:#aaa">
+                                {n['resumen']}{'...' if len(n['resumen']) >= 200 else ''}
+                              </div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                    else:
+                        st.info("📭 Sin noticias recientes para tus tickers")
 
     st.divider()
-
     st.caption(f"🕐 Última actualización: {datetime.now().strftime('%H:%M %d-%m-%Y')}")
 
 elif pagina == "🔍 Screener":
@@ -3642,32 +3971,42 @@ elif pagina == "📈 Análisis Individual":
         try:
             piotr_r = calc_piotroski(fin, bs, cf)
             piotr_s = piotr_r[0] if isinstance(piotr_r, tuple) else piotr_r
-            col_p1.metric("Piotroski", f"{piotr_s}/9",
-                          help="≥7 fuerte · 4-6 medio · ≤3 débil")
+            piotr_det = piotr_r[1] if isinstance(piotr_r, tuple) else {}
+            if piotr_s is not None:
+                # Mostrar cuántos criterios fueron evaluables
+                meta = piotr_det.get("_meta", {}).get("val", "")
+                col_p1.metric("Piotroski", f"{piotr_s}/9",
+                              help=f"≥7 fuerte · 4-6 medio · ≤3 débil. {meta}")
+            else:
+                motivo = piotr_det.get("_error", {}).get("val", "Sin datos suficientes")
+                col_p1.metric("Piotroski", "N/A", help=motivo)
         except Exception:
-            col_p1.metric("Piotroski", "—")
+            col_p1.metric("Piotroski", "N/A")
 
         try:
             altman_r = calc_altman(info, fin, bs)
-            altman_z = altman_r[0] if isinstance(altman_r, tuple) else altman_r
+            altman_z    = altman_r[0] if isinstance(altman_r, tuple) else altman_r
+            altman_zona = altman_r[1] if isinstance(altman_r, tuple) else ""
             if altman_z is not None:
                 col_p2.metric("Altman Z", f"{altman_z:.2f}",
-                              help=">3 sano · 1.8-3 gris · <1.8 distress")
+                              help=f">3 sano · 1.8-3 gris · <1.8 distress. {altman_zona}")
             else:
-                col_p2.metric("Altman Z", "—")
+                col_p2.metric("Altman Z", "N/A", help=altman_zona or "Sin datos")
         except Exception:
-            col_p2.metric("Altman Z", "—")
+            col_p2.metric("Altman Z", "N/A")
 
         try:
             graham = calc_graham(info)
             if graham is not None:
                 graham_disc = (precio/graham - 1) * 100
                 col_p3.metric("Graham", f"{graham:.2f}",
-                              delta=f"{graham_disc:+.1f}%")
+                              delta=f"{graham_disc:+.1f}%",
+                              help="Valor intrínseco. delta = precio vs Graham")
             else:
-                col_p3.metric("Graham", "—")
+                col_p3.metric("Graham", "N/A",
+                              help="Falta EPS o Book Value, o son negativos")
         except Exception:
-            col_p3.metric("Graham", "—")
+            col_p3.metric("Graham", "N/A")
 
         try:
             fcf_y = calc_fcf_yield(info, cf)
@@ -3675,9 +4014,9 @@ elif pagina == "📈 Análisis Individual":
                 col_p4.metric("FCF Yield", f"{fcf_y:.1f}%",
                               help=">5% atractivo · >8% excelente")
             else:
-                col_p4.metric("FCF Yield", "—")
+                col_p4.metric("FCF Yield", "N/A", help="Sin datos de FCF o Market Cap")
         except Exception:
-            col_p4.metric("FCF Yield", "—")
+            col_p4.metric("FCF Yield", "N/A")
 
     # ─────────────────────────────────────────────────────────────
     # TAB 5: PEERS
