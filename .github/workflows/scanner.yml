@@ -12,6 +12,10 @@ jobs:
   scan:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      # Las actions de GitHub migran de Node 20 a Node 24 el 16-06-2026;
+      # esto adopta Node 24 ya y elimina el warning de deprecación
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
