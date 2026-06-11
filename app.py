@@ -1750,6 +1750,126 @@ def calcular_velocidad_10y():
 
 
 
+def detectar_soportes_resistencias(df, max_niveles=3, n_pivote=5):
+    """
+    Detecta soportes y resistencias por pivots + clustering.
+    1. Pivots: máximos/mínimos locales en ventana de ±n_pivote velas.
+    2. Clustering: niveles a menos de un umbral (max(0.6×ATR, 0.8% precio)) se fusionan.
+    3. Score: nº de toques (más toques = nivel más respetado) + recencia.
+    Devuelve (soportes, resistencias): listas de dicts {nivel, toques, ultimo_toque}
+    ordenadas por cercanía al precio actual.
+    Al recibir el df YA filtrado por periodo, los niveles dependen del timeframe.
+    """
+    try:
+        c = df["Close"].astype(float)
+        h = df["High"].astype(float) if "High" in df.columns else c
+        l = df["Low"].astype(float)  if "Low"  in df.columns else c
+        n = len(c)
+        if n < 40:
+            return [], []
+        precio = float(c.iloc[-1])
+
+        # ATR para el umbral de clustering
+        tr = pd.concat([h - l, (h - c.shift(1)).abs(),
+                        (l - c.shift(1)).abs()], axis=1).max(axis=1)
+        atr_loc = float(tr.rolling(14).mean().iloc[-1])
+        umbral = max(0.6 * atr_loc, precio * 0.008)
+
+        # Pivots (excluimos las últimas n_pivote velas, aún sin confirmar)
+        pivots = []  # (precio_nivel, idx)
+        for i in range(n_pivote, n - n_pivote):
+            ventana_h = h.iloc[i - n_pivote:i + n_pivote + 1]
+            ventana_l = l.iloc[i - n_pivote:i + n_pivote + 1]
+            if h.iloc[i] >= ventana_h.max():
+                pivots.append((float(h.iloc[i]), i))
+            if l.iloc[i] <= ventana_l.min():
+                pivots.append((float(l.iloc[i]), i))
+        if not pivots:
+            return [], []
+
+        # Clustering por proximidad de precio
+        pivots.sort(key=lambda x: x[0])
+        clusters = []
+        actual = [pivots[0]]
+        for p in pivots[1:]:
+            if p[0] - actual[-1][0] <= umbral:
+                actual.append(p)
+            else:
+                clusters.append(actual)
+                actual = [p]
+        clusters.append(actual)
+
+        niveles = []
+        for cl in clusters:
+            nivel = float(np.mean([p[0] for p in cl]))
+            toques = len(cl)
+            ultimo = max(p[1] for p in cl)
+            # Score: toques pesan, recencia desempata
+            score = toques + (ultimo / n) * 0.5
+            niveles.append({"nivel": nivel, "toques": toques,
+                            "recencia": ultimo / n, "score": score})
+
+        # Solo niveles con al menos 1 toque real, separar por lado
+        soportes     = [x for x in niveles if x["nivel"] < precio * 0.998]
+        resistencias = [x for x in niveles if x["nivel"] > precio * 1.002]
+        # Ordenar por score y quedarse con los mejores; luego por cercanía
+        soportes     = sorted(soportes, key=lambda x: -x["score"])[:max_niveles]
+        resistencias = sorted(resistencias, key=lambda x: -x["score"])[:max_niveles]
+        soportes     = sorted(soportes, key=lambda x: precio - x["nivel"])
+        resistencias = sorted(resistencias, key=lambda x: x["nivel"] - precio)
+        return soportes, resistencias
+    except Exception:
+        return [], []
+
+
+def analizar_volumen(df, ventana=60):
+    """
+    Lectura de volumen sobre el periodo visible:
+    - vol_rel: volumen de hoy vs media 20 sesiones
+    - ratio_ud: volumen medio en días alcistas / días bajistas (>1.15 acumulación,
+      <0.85 distribución)
+    - corr_mov_vol: correlación |retorno| vs volumen (¿los movimientos grandes
+      van acompañados de volumen? sano si > 0.2)
+    - obv_confirma: tendencia del OBV (20 sesiones) vs tendencia del precio —
+      True confirma, False diverge, None indeterminado
+    """
+    try:
+        if "Volume" not in df.columns:
+            return None
+        c = df["Close"].astype(float)
+        v = df["Volume"].astype(float)
+        if len(c) < 30 or v.sum() <= 0:
+            return None
+
+        out = {}
+        v20 = float(v.tail(21).iloc[:-1].mean())
+        out["vol_rel"] = float(v.iloc[-1]) / v20 if v20 > 0 else None
+
+        sub = df.tail(min(ventana, len(df)))
+        rets = sub["Close"].pct_change().dropna()
+        vols = sub["Volume"].astype(float).reindex(rets.index)
+        up_vol   = vols[rets > 0].mean()
+        down_vol = vols[rets < 0].mean()
+        out["ratio_ud"] = float(up_vol / down_vol) if down_vol and down_vol > 0 else None
+
+        out["corr_mov_vol"] = float(rets.abs().corr(vols)) if len(rets) > 10 else None
+
+        # OBV vectorizado vs precio (últimas 20 sesiones)
+        obv = (np.sign(c.diff()).fillna(0) * v).cumsum()
+        if len(obv) > 21:
+            obv_up    = float(obv.iloc[-1]) > float(obv.iloc[-21])
+            precio_up = float(c.iloc[-1])  > float(c.iloc[-21])
+            out["obv_confirma"] = (obv_up == precio_up)
+            out["obv_dir"]    = "↑" if obv_up else "↓"
+            out["precio_dir"] = "↑" if precio_up else "↓"
+        else:
+            out["obv_confirma"] = None
+        return out
+    except Exception:
+        return None
+
+
+
 def _backtest_entradas(hist, modo="pullback", horizonte=21, max_stop_pct=15.0):
     """
     Mini-backtest de una regla de entrada sobre el histórico del PROPIO ticker.
@@ -4629,6 +4749,23 @@ elif pagina == "📈 Análisis Individual":
                 hovertemplate="MA200: %{y:.2f}<extra></extra>"
             ))
 
+        # ── Soportes y resistencias detectados (del periodo visible) ──
+        soportes_v, resist_v = detectar_soportes_resistencias(hist_view)
+        for s in soportes_v:
+            fig_main.add_hline(
+                y=s["nivel"], line_color="#50fa7b", line_width=1,
+                line_dash="dot", opacity=0.75,
+                annotation_text=f"S {s['nivel']:.2f} ({s['toques']}t)",
+                annotation_position="left",
+                annotation_font=dict(size=10, color="#50fa7b"))
+        for r in resist_v:
+            fig_main.add_hline(
+                y=r["nivel"], line_color="#ff5555", line_width=1,
+                line_dash="dot", opacity=0.75,
+                annotation_text=f"R {r['nivel']:.2f} ({r['toques']}t)",
+                annotation_position="left",
+                annotation_font=dict(size=10, color="#ff5555"))
+
         fig_main.update_layout(
             template="plotly_dark",
             paper_bgcolor="#12121f", plot_bgcolor="#12121f",
@@ -4649,6 +4786,114 @@ elif pagina == "📈 Análisis Individual":
         )
         st.plotly_chart(fig_main, use_container_width=True,
                         config={"displayModeBar": False})
+
+        # ── Panel de volumen (mismo periodo) ──────────────────────
+        if "Volume" in hist_view.columns and hist_view["Volume"].sum() > 0:
+            vols_view = hist_view["Volume"].astype(float)
+            rets_view = closes_view.pct_change().fillna(0)
+            colores_v = ["#50fa7b" if r >= 0 else "#ff5555" for r in rets_view]
+            fig_vol = go.Figure()
+            fig_vol.add_trace(go.Bar(
+                x=hist_view.index, y=vols_view, marker_color=colores_v,
+                name="Volumen", opacity=0.85,
+                hovertemplate="Vol: %{y:,.0f}<extra></extra>"))
+            fig_vol.add_trace(go.Scatter(
+                x=hist_view.index, y=vols_view.rolling(20).mean(),
+                name="Media 20", line=dict(color="#f1fa8c", width=1.5),
+                hovertemplate="Media 20: %{y:,.0f}<extra></extra>"))
+            fig_vol.update_layout(
+                template="plotly_dark",
+                paper_bgcolor="#12121f", plot_bgcolor="#12121f",
+                height=160, margin=dict(l=10, r=10, t=5, b=10),
+                showlegend=False, hovermode="x unified",
+                xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+                yaxis=dict(gridcolor="rgba(255,255,255,0.05)", side="right",
+                           tickfont=dict(color="#bbb", size=10)))
+            st.plotly_chart(fig_vol, use_container_width=True,
+                            config={"displayModeBar": False})
+
+        # ── Lectura automática de la gráfica ──────────────────────
+        st.markdown("**📖 Lectura de la gráfica** *(periodo seleccionado)*")
+        lecturas = []
+
+        if soportes_v:
+            s0 = soportes_v[0]
+            dist_s = (s0["nivel"] / precio - 1) * 100
+            lecturas.append(
+                f"🟢 **Soporte más cercano: {s0['nivel']:.2f}** ({dist_s:+.1f}%), "
+                f"tocado {s0['toques']} veces — "
+                + ("nivel muy respetado, zona lógica para stop." if s0["toques"] >= 3
+                   else "nivel moderado."))
+        else:
+            lecturas.append("🟢 Sin soportes claros debajo en este periodo — "
+                            "el precio está en zona baja del rango (cuidado con stops).")
+
+        if resist_v:
+            r0 = resist_v[0]
+            dist_r = (r0["nivel"] / precio - 1) * 100
+            lecturas.append(
+                f"🔴 **Resistencia más cercana: {r0['nivel']:.2f}** ({dist_r:+.1f}%), "
+                f"tocada {r0['toques']} veces — "
+                + ("barrera fuerte: esperar ruptura con volumen antes de perseguir."
+                   if r0["toques"] >= 3 else "barrera moderada."))
+        else:
+            lecturas.append("🔴 **Sin resistencias por encima en este periodo — máximos "
+                            "del rango.** Subida libre: sin vendedores atrapados arriba.")
+
+        if soportes_v and resist_v:
+            rango = resist_v[0]["nivel"] - soportes_v[0]["nivel"]
+            if rango > 0:
+                pos_rango = (precio - soportes_v[0]["nivel"]) / rango * 100
+                lecturas.append(
+                    f"📍 El precio está al **{pos_rango:.0f}%** del rango "
+                    f"soporte-resistencia — "
+                    + ("cerca del soporte: mejor ratio riesgo/beneficio para comprar."
+                       if pos_rango < 35 else
+                       "cerca de la resistencia: el recorrido fácil ya está hecho."
+                       if pos_rango > 65 else "zona media, sin ventaja posicional."))
+
+        av = analizar_volumen(hist_view)
+        if av:
+            if av.get("vol_rel") is not None:
+                vr = av["vol_rel"]
+                lecturas.append(
+                    f"📊 **Volumen hoy: ×{vr:.1f}** la media de 20 sesiones — "
+                    + ("actividad excepcional, hay interés institucional." if vr >= 2
+                       else "por encima de lo normal." if vr >= 1.3
+                       else "sesión tranquila." if vr >= 0.7
+                       else "volumen muy bajo: movimientos poco fiables."))
+            if av.get("ratio_ud") is not None:
+                ru = av["ratio_ud"]
+                lecturas.append(
+                    f"⚖️ Volumen en días alcistas vs bajistas: **×{ru:.2f}** — "
+                    + ("**acumulación**: se compra con más fuerza de la que se vende."
+                       if ru >= 1.15 else
+                       "**distribución**: las caídas llevan más volumen que las subidas — "
+                       "señal de venta institucional." if ru <= 0.85
+                       else "equilibrado."))
+            if av.get("obv_confirma") is not None:
+                if av["obv_confirma"]:
+                    lecturas.append(
+                        f"✅ **El volumen confirma el precio** (OBV {av['obv_dir']} y "
+                        f"precio {av['precio_dir']} en 20 sesiones): el movimiento "
+                        f"actual tiene respaldo real.")
+                else:
+                    lecturas.append(
+                        f"⚠️ **Divergencia precio-volumen** (precio {av['precio_dir']} "
+                        f"pero OBV {av['obv_dir']}): el movimiento no está respaldado "
+                        f"por flujo de dinero — desconfiar de su continuidad.")
+            if av.get("corr_mov_vol") is not None:
+                cv = av["corr_mov_vol"]
+                lecturas.append(
+                    f"🔗 Correlación movimiento-volumen: **{cv:+.2f}** — "
+                    + ("sana: los días de movimiento fuerte van con volumen (participación real)."
+                       if cv >= 0.2 else
+                       "baja: los movimientos grandes ocurren sin volumen — más ruido que tendencia."))
+
+        for lect in lecturas:
+            st.markdown(f"- {lect}")
+
+        st.divider()
 
         # Indicadores en grid 2x4
         st.markdown("**Indicadores clave**")
