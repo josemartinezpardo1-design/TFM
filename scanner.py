@@ -58,11 +58,33 @@ def es_primer_run_del_dia():
 # ──────────────────────────────────────────────────────────────────
 # 2. Universo
 # ──────────────────────────────────────────────────────────────────
+FALLBACK_TICKERS = ['AAPL', 'ABBV', 'ABNB', 'ABT', 'ADBE', 'AEP', 'ALB', 'AMD', 'AMGN', 'AMT', 'AMZN', 'APD', 'ARE', 'AVB', 'AVGO', 'AWK', 'AXP', 'BA', 'BAC', 'BKNG', 'BLK', 'BMY', 'BX', 'C', 'CAT', 'CCI', 'CHTR', 'CL', 'CMCSA', 'CMG', 'COF', 'COP', 'COST', 'CRM', 'CSCO', 'CTVA', 'CVS', 'CVX', 'D', 'DASH', 'DD', 'DE', 'DHR', 'DIS', 'DLR', 'DOW', 'DUK', 'DVN', 'EA', 'ECL', 'ED', 'EIX', 'ELV', 'EMR', 'EOG', 'EQIX', 'EQR', 'ETN', 'ETR', 'EXC', 'EXR', 'F', 'FANG', 'FCX', 'GD', 'GE', 'GILD', 'GIS', 'GM', 'GOOGL', 'GS', 'HD', 'HES', 'HON', 'HSY', 'IBM', 'INTC', 'ITW', 'JNJ', 'JPM', 'KHC', 'KMB', 'KMI', 'KO', 'LIN', 'LLY', 'LMT', 'LOW', 'MA', 'MAR', 'MCD', 'MDLZ', 'MDT', 'META', 'MLM', 'MMM', 'MO', 'MPC', 'MRK', 'MS', 'MSFT', 'NEE', 'NEM', 'NFLX', 'NKE', 'NOC', 'NOW', 'NUE', 'NVDA', 'O', 'ORCL', 'ORLY', 'OXY', 'PANW', 'PCG', 'PEG', 'PEP', 'PFE', 'PG', 'PLD', 'PM', 'PPG', 'PSA', 'PSX', 'PXD', 'PYPL', 'QCOM', 'ROKU', 'RTX', 'SBAC', 'SBUX', 'SCHW', 'SHW', 'SLB', 'SO', 'SPG', 'SPGI', 'SPOT', 'SRE', 'STLD', 'STZ', 'SYY', 'T', 'TJX', 'TMO', 'TMUS', 'TSLA', 'TTWO', 'TXN', 'UNH', 'UNP', 'UPS', 'V', 'VLO', 'VMC', 'VTR', 'VZ', 'WBD', 'WEC', 'WELL', 'WFC', 'WMB', 'WMT', 'XEL', 'XOM']
+
+
 def get_sp500_tickers():
+    """
+    Universo S&P 500 desde Wikipedia. Los runners de GitHub suelen recibir
+    403 sin User-Agent de navegador, así que la petición se hace con requests
+    + cabeceras. Si aun así falla, usa el fallback de 165 valores grandes
+    (avisando en el log) para no perder el escaneo.
+    """
+    from io import StringIO
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    tablas = pd.read_html(url)
-    tickers = tablas[0]["Symbol"].astype(str).str.replace(".", "-", regex=False)
-    return [t for t in tickers.tolist() if t and t != "nan"]
+    headers = {"User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                               "AppleWebKit/537.36 (KHTML, like Gecko) "
+                               "Chrome/124.0 Safari/537.36")}
+    try:
+        resp = requests.get(url, headers=headers, timeout=30)
+        resp.raise_for_status()
+        tablas = pd.read_html(StringIO(resp.text))
+        tickers = tablas[0]["Symbol"].astype(str).str.replace(".", "-", regex=False)
+        out = [t for t in tickers.tolist() if t and t != "nan"]
+        if len(out) > 400:
+            return out
+        print(f"  ⚠️ Wikipedia devolvió solo {len(out)} tickers — uso fallback")
+    except Exception as e:
+        print(f"  ⚠️ Wikipedia falló ({e}) — uso fallback de {len(FALLBACK_TICKERS)} valores")
+    return FALLBACK_TICKERS
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -319,4 +341,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception:
+        import traceback
+        print("\n💥 ERROR NO CONTROLADO — traceback completo:")
+        traceback.print_exc()
+        sys.exit(1)
