@@ -322,24 +322,6 @@ def calc_adx(df, p=14):
     dx  = 100 * (pdi - mdi).abs() / (pdi + mdi).replace(0, np.nan)
     return dx.rolling(p).mean(), pdi, mdi
 
-def calc_obv(df):
-    d   = np.sign(df["Close"].diff())
-    obv = (d * df["Volume"]).fillna(0).cumsum()
-    osm = obv.rolling(20).mean()
-    ot  = pd.Series(np.where(obv > osm, 1, -1), index=df.index)
-    p20 = df["Close"].pct_change(20)
-    o20 = obv.pct_change(20)
-    div = pd.Series(np.where((p20 < 0) & (o20 > 0), "Alcista",
-                   np.where((p20 > 0) & (o20 < 0), "Bajista", "Neutral")),
-                   index=df.index)
-    return obv, osm, ot, div
-
-def calc_stoch(df, kp=14, dp=3):
-    lm = df["Low"].rolling(kp).min()
-    hm = df["High"].rolling(kp).max()
-    k  = 100 * (df["Close"] - lm) / (hm - lm).replace(0, np.nan)
-    return k, k.rolling(dp).mean()
-
 def calc_bb(s, p=20, std=2):
     m  = s.rolling(p).mean()
     sg = s.rolling(p).std()
@@ -656,35 +638,6 @@ def calc_fcf_yield(info, cf):
     except Exception:
         pass
     return None
-
-def calc_dupont(fin, bs):
-    try:
-        ni  = _sf(fin, "Net Income", 0)
-        rev = _sf(fin, "Total Revenue", 0) or 1
-        ta  = _sf(bs, "Total Assets", 0) or 1
-        eq  = _sf(bs, "Stockholders Equity", 0) or 1
-        nm  = ni / rev; at = rev / ta; lv = ta / eq
-        return {"ROE": round(nm*at*lv*100, 2), "Margen_Neto": round(nm*100, 2),
-                "Rot_Activos": round(at, 3), "Apalanc": round(lv, 2)}
-    except Exception:
-        return None
-
-def calc_cagr(fin):
-    try:
-        if fin.empty or len(fin.columns) < 2:
-            return None, None
-        def cg(s):
-            v = s.dropna()
-            if len(v) < 2: return None
-            vi, vf, n = v.iloc[-1], v.iloc[0], len(v) - 1
-            if vi <= 0 or vf <= 0: return None
-            return round(((vf / vi) ** (1 / n) - 1) * 100, 1)
-        rv = fin.loc["Total Revenue"] if "Total Revenue" in fin.index else None
-        ni = fin.loc["Net Income"]    if "Net Income"    in fin.index else None
-        return (cg(rv) if rv is not None else None,
-                cg(ni) if ni is not None else None)
-    except Exception:
-        return None, None
 
 def mf(nombre, val, fmt, bueno, malo):
     if val is None: return f"**{nombre}:** N/A"
@@ -1474,77 +1427,6 @@ def label_sc(sc):
     if sc >= 4.0: return "NEUTRO"
     return "EVITAR"
 
-def analizar_screener(ticker):
-    try:
-        hist, info = descargar(ticker, "1y")
-        if hist.empty or len(hist) < 20:
-            return None
-        last   = hist.iloc[-1]
-        precio = last["Close"]
-        if precio <= 0: return None
-        mc_b  = round(info.get("marketCap", 0) / 1e9, 2)
-        mom3  = ((precio / hist["Close"].iloc[-63] - 1) * 100) if len(hist) > 63 else np.nan
-        sma50 = hist["Close"].rolling(50).mean().iloc[-1] if len(hist) >= 50 else np.nan
-        vs50  = round((precio / sma50 - 1) * 100, 2) if pd.notna(sma50) else np.nan
-        dmx   = round((precio / hist["High"].max() - 1) * 100, 2)
-        vh    = last["Volume"]
-        va20  = hist["Volume"].rolling(20).mean().iloc[-1]
-        vr20  = round(vh / va20, 2) if va20 > 0 else np.nan
-        per   = info.get("trailingPE")
-        roe   = info.get("returnOnEquity")
-        mn    = info.get("profitMargins")
-        de    = info.get("debtToEquity")
-        dy    = info.get("dividendYield")
-        tm    = info.get("targetMeanPrice")
-        pot   = round((tm / precio - 1) * 100, 1) if tm and precio > 0 else np.nan
-        r = {
-            "Ticker": ticker, "Precio": round(precio, 2), "MktCap (B$)": mc_b,
-            "Mom 3M %": round(mom3, 2) if pd.notna(mom3) else np.nan,
-            "vs SMA50 %": vs50, "Dist Max52W %": dmx, "Vol/Avg 20d": vr20,
-            "PER":        round(per, 1) if per else np.nan,
-            "ROE %":      round(roe * 100, 1) if roe else np.nan,
-            "Margen Net %": round(mn * 100, 1) if mn else np.nan,
-            "D/E":        round(de, 1) if de else np.nan,
-            "Div Yield %":round(dy * 100, 2) if dy else 0,
-            "Potencial %": pot,
-            "Consenso":   info.get("recommendationKey", "N/A"),
-        }
-        r["Score"] = score_screener(r)
-        r["Label"] = label_sc(r["Score"])
-        return r
-    except Exception:
-        return None
-
-def filtrar(df, modo):
-    d = df.copy()
-    if   modo == "VALUE":     mask = d["PER"].between(0, 20) & (d["Margen Net %"] > 8)
-    elif modo == "MOMENTUM":  mask = (d["Mom 3M %"] > 10) & (d["vs SMA50 %"] > 0)
-    elif modo == "QUALITY":   mask = (d["ROE %"] > 15) & (d["Margen Net %"] > 12)
-    elif modo == "DIVIDENDOS":mask = (d["Div Yield %"] > 2.5) & (d["Margen Net %"] > 5)
-    else:                     mask = pd.Series([True] * len(d), index=d.index)
-    return d[mask].copy()
-
-
-# ╔═══════════════════════════════════════════════════════════════╗
-# ║  RENTA FIJA — ETF PROXY & CURVA DE TIPOS                     ║
-# ╚═══════════════════════════════════════════════════════════════╝
-RF_ETFS = {
-    "SHY":  ("Tesoros US 1-3A",   "Gobierno",       1.8),
-    "IEF":  ("Tesoros US 7-10A",  "Gobierno",       7.5),
-    "TLT":  ("Tesoros US 20A+",   "Gobierno",      17.0),
-    "TIP":  ("TIPS — Inflación",  "Inflación",      6.5),
-    "LQD":  ("Corp IG USD",       "Inv. Grade",     8.5),
-    "HYG":  ("Corp HY USD",       "High Yield",     3.8),
-    "EMB":  ("Emergentes USD",    "Emergentes",     7.0),
-    "BNDX": ("Intl ex-US",        "Global",         8.0),
-}
-
-YIELD_CURVE_SERIES = {
-    "1M": "DGS1MO", "3M": "DGS3MO", "6M": "DGS6MO",
-    "1A": "DGS1",   "2A": "DGS2",   "5A": "DGS5",
-    "10A":"DGS10",  "30A":"DGS30",
-}
-
 def get_last_fred(series_id: str):
     """Retorna último valor de una serie FRED o None."""
     if not fred_client:
@@ -1760,6 +1642,359 @@ with st.sidebar:
 # ╔═══════════════════════════════════════════════════════════════╗
 # ║  MORNING OUTLOOK                                              ║
 # ╚═══════════════════════════════════════════════════════════════╝
+@st.cache_data(ttl=300, show_spinner=False)
+def _outlook_mercado_bulk(tickers_tuple):
+    """Descarga bulk del estado del mercado. Cacheada 5 min.
+    Lanza excepción si obtiene <3 tickers para NO cachear fallos."""
+    out = {}
+    bulk_m = yf.download(list(tickers_tuple), period="5d",
+                         auto_adjust=True, progress=False)
+    if not bulk_m.empty and isinstance(bulk_m.columns, pd.MultiIndex):
+        for ticker in tickers_tuple:
+            try:
+                if ticker in bulk_m["Close"].columns:
+                    c = bulk_m["Close"][ticker].dropna()
+                    if len(c) >= 2:
+                        p = float(c.iloc[-1])
+                        out[ticker] = (p, (p / float(c.iloc[-2]) - 1) * 100)
+            except Exception:
+                continue
+    if len(out) < 3:
+        raise RuntimeError("Bulk de mercado incompleto")
+    return out
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _outlook_sectores_bulk(etfs_tuple, ytd_start):
+    """Descarga bulk de ETFs sectoriales y calcula retornos multi-periodo.
+    Cacheada 5 min. Lanza excepción si no obtiene datos para NO cachear fallos."""
+    bulk_s = yf.download(list(etfs_tuple), period="1y",
+                         auto_adjust=True, progress=False)
+    if bulk_s.empty or not isinstance(bulk_s.columns, pd.MultiIndex):
+        raise RuntimeError("Bulk de sectores vacío")
+    closes_all = bulk_s["Close"]
+    out = {}
+    for ticker in etfs_tuple:
+        try:
+            if ticker not in closes_all.columns:
+                continue
+            c_s = closes_all[ticker].dropna()
+            if len(c_s) < 22:
+                continue
+            p = float(c_s.iloc[-1])
+            d = {
+                "hoy": (p / float(c_s.iloc[-2]) - 1) * 100,
+                "1m":  (p / float(c_s.iloc[-22])  - 1) * 100 if len(c_s) > 22  else None,
+                "3m":  (p / float(c_s.iloc[-64])  - 1) * 100 if len(c_s) > 64  else None,
+                "6m":  (p / float(c_s.iloc[-127]) - 1) * 100 if len(c_s) > 127 else None,
+            }
+            c_ytd = c_s[c_s.index >= ytd_start]
+            d["ytd"] = (p / float(c_ytd.iloc[0]) - 1) * 100 if not c_ytd.empty else None
+            out[ticker] = d
+        except Exception:
+            continue
+    if not out:
+        raise RuntimeError("Sin datos sectoriales")
+    return out
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _outlook_watchlist_bulk(tickers_tuple):
+    """Descarga bulk 6mo para la watchlist de Outlook. Cacheada 5 min."""
+    out = {}
+    if len(tickers_tuple) == 1:
+        h_t, _ = descargar(tickers_tuple[0], "6mo")
+        if not h_t.empty:
+            out[tickers_tuple[0]] = h_t["Close"].dropna()
+        return out
+    bulk = yf.download(list(tickers_tuple), period="6mo",
+                       auto_adjust=True, progress=False)
+    if isinstance(bulk.columns, pd.MultiIndex):
+        for t in tickers_tuple:
+            if t in bulk["Close"].columns:
+                c = bulk["Close"][t].dropna()
+                if not c.empty:
+                    out[t] = c
+    return out
+
+
+@st.cache_data(ttl=43200)
+def calcular_velocidad_10y():
+    """
+    Señal de velocidad del bono a 10 años (Goldman Sachs / TKer):
+    el NIVEL de tipos no predice retornos, pero un movimiento de >2σ
+    en 1 mes históricamente genera retornos negativos del S&P a 1 mes.
+    Calcula: cambio en 21 días hábiles vs sigma de cambios mensuales (3 años).
+    Devuelve dict o None.
+    """
+    if not fred_client:
+        return None
+    try:
+        s = fred_client.get_series("DGS10", observation_start="2018-01-01").dropna()
+        if len(s) < 300:
+            return None
+        cambios_1m = s.diff(21).dropna()
+        cambio_actual = float(cambios_1m.iloc[-1])
+        sigma = float(cambios_1m.tail(756).std())  # ~3 años hábiles
+        if sigma <= 0:
+            return None
+        z = cambio_actual / sigma
+        return {
+            "nivel":     float(s.iloc[-1]),
+            "cambio_bp": cambio_actual * 100,
+            "sigma_bp":  sigma * 100,
+            "z":         z,
+        }
+    except Exception:
+        return None
+
+
+
+def _backtest_entradas(hist, modo="pullback", horizonte=21, max_stop_pct=15.0):
+    """
+    Mini-backtest de una regla de entrada sobre el histórico del PROPIO ticker.
+    Simula: señal → entrada al cierre → stop 2xATR (cap -15%) gestionado con
+    el Low diario → salida al stop o al cierre tras `horizonte` días.
+    Devuelve dict con n señales, win rate y retorno medio, o None.
+    ORIENTATIVO: sin comisiones ni slippage; pocas señales = poca significancia.
+    """
+    try:
+        c = hist["Close"].astype(float)
+        h = hist["High"].astype(float)  if "High"   in hist.columns else c
+        l = hist["Low"].astype(float)   if "Low"    in hist.columns else c
+        v = hist["Volume"].astype(float) if "Volume" in hist.columns else None
+        if len(c) < 260:
+            return None
+
+        tr   = pd.concat([h - l, (h - c.shift(1)).abs(),
+                          (l - c.shift(1)).abs()], axis=1).max(axis=1)
+        atr  = tr.rolling(14).mean()
+        ma50  = c.rolling(50).mean()
+        ma200 = c.rolling(200).mean()
+        rsi   = calc_rsi(c)
+        vol20 = v.rolling(20).mean() if v is not None else None
+
+        trades = []
+        i, n = 210, len(c)
+        while i < n - 1:
+            senal = False
+            if modo == "pullback":
+                if (pd.notna(ma200.iloc[i]) and pd.notna(rsi.iloc[i])
+                        and c.iloc[i] > ma200.iloc[i]
+                        and ma50.iloc[i] > ma200.iloc[i]
+                        and abs(c.iloc[i] / ma50.iloc[i] - 1) <= 0.03
+                        and 35 <= rsi.iloc[i] <= 55):
+                    senal = True
+            else:  # breakout
+                high60 = float(h.iloc[i-60:i].max())
+                volrel_ok = True
+                if vol20 is not None and pd.notna(vol20.iloc[i]) and vol20.iloc[i] > 0:
+                    volrel_ok = float(v.iloc[i]) >= 1.5 * float(vol20.iloc[i])
+                if float(c.iloc[i]) >= high60 and volrel_ok:
+                    senal = True
+
+            if senal and pd.notna(atr.iloc[i]) and atr.iloc[i] > 0:
+                entrada = float(c.iloc[i])
+                stop = max(entrada - 2 * float(atr.iloc[i]),
+                           entrada * (1 - max_stop_pct / 100))
+                fin = min(i + horizonte, n - 1)
+                salida = None
+                for j in range(i + 1, fin + 1):
+                    if float(l.iloc[j]) <= stop:
+                        salida = (stop / entrada - 1) * 100
+                        break
+                if salida is None:
+                    salida = (float(c.iloc[fin]) / entrada - 1) * 100
+                trades.append(salida)
+                i = fin  # evitar señales solapadas
+            else:
+                i += 1
+
+        if not trades:
+            return {"n": 0}
+        tr_s = pd.Series(trades)
+        return {"n": len(trades),
+                "win_rate": float((tr_s > 0).mean() * 100),
+                "ret_medio": float(tr_s.mean()),
+                "mejor": float(tr_s.max()),
+                "peor": float(tr_s.min())}
+    except Exception:
+        return None
+
+
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _news_general_cached():
+    """Noticias generales Finnhub, cacheadas 10 min."""
+    if fh_client is None:
+        return []
+    return fh_client.general_news("general", min_id=0) or []
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _news_company_cached(ticker, desde, hasta):
+    """Noticias de empresa Finnhub, cacheadas 10 min."""
+    if fh_client is None:
+        return []
+    return fh_client.company_news(ticker, _from=desde, to=hasta) or []
+
+
+
+def _screener_metricas(df_t):
+    """
+    Calcula métricas técnicas de un DataFrame OHLCV de ~2 años.
+    Devuelve dict o None si datos insuficientes.
+    Todo basado en precio, volumen y ATR — sin llamadas a APIs extra.
+    """
+    try:
+        c = df_t["Close"].dropna()
+        if len(c) < 60:
+            return None
+        precio = float(c.iloc[-1])
+        if precio <= 0:
+            return None
+
+        h = df_t["High"].dropna()   if "High"   in df_t.columns else c
+        l = df_t["Low"].dropna()    if "Low"    in df_t.columns else c
+        v = df_t["Volume"].dropna() if "Volume" in df_t.columns else pd.Series(dtype=float)
+
+        # Momentum
+        mom_1m  = (precio / float(c.iloc[-22])  - 1) * 100 if len(c) > 22  else None
+        mom_3m  = (precio / float(c.iloc[-64])  - 1) * 100 if len(c) > 64  else None
+        mom_6m  = (precio / float(c.iloc[-127]) - 1) * 100 if len(c) > 127 else None
+        # Momentum 12-1 (252d lookback, skip 21d) — el del paper
+        mom_12_1 = None
+        if len(c) > 274:
+            mom_12_1 = (float(c.iloc[-22]) / float(c.iloc[-274]) - 1) * 100
+
+        # Medias
+        ma50  = float(c.tail(50).mean())
+        ma200 = float(c.tail(200).mean()) if len(c) >= 200 else None
+
+        # RSI
+        rsi_s = calc_rsi(c)
+        rsi   = float(rsi_s.iloc[-1]) if not rsi_s.empty else None
+
+        # ATR (14) — sobre High/Low/Close reales
+        tr = pd.concat([h - l,
+                        (h - c.shift(1)).abs(),
+                        (l - c.shift(1)).abs()], axis=1).max(axis=1)
+        atr = float(tr.rolling(14).mean().iloc[-1])
+        atr_pct = atr / precio * 100 if precio > 0 else None
+
+        # Volumen relativo (hoy vs media 20d)
+        vol_rel = None
+        if len(v) >= 21:
+            v20 = float(v.tail(21).iloc[:-1].mean())
+            if v20 > 0:
+                vol_rel = float(v.iloc[-1]) / v20
+
+        # Máx/mín 52 semanas y distancia
+        n52 = min(252, len(c))
+        high_52 = float(h.tail(n52).max())
+        low_52  = float(l.tail(n52).min())
+        pos_52  = ((precio - low_52) / (high_52 - low_52) * 100) if high_52 > low_52 else 50
+
+        # Máximo de 60 días ANTERIOR a hoy (para breakout)
+        high_60_prev = float(h.tail(61).iloc[:-1].max()) if len(h) > 61 else None
+
+        # Max drawdown y Calmar sobre último año
+        c1y = c.tail(min(252, len(c)))
+        ret_1y = (float(c1y.iloc[-1]) / float(c1y.iloc[0]) - 1)
+        dd = (c1y / c1y.cummax() - 1).min()
+        calmar = (ret_1y / abs(float(dd))) if dd < 0 else None
+
+        return {
+            "precio": precio, "mom_1m": mom_1m, "mom_3m": mom_3m,
+            "mom_6m": mom_6m, "mom_12_1": mom_12_1,
+            "ma50": ma50, "ma200": ma200, "rsi": rsi,
+            "atr": atr, "atr_pct": atr_pct, "vol_rel": vol_rel,
+            "pos_52": pos_52, "high_60_prev": high_60_prev,
+            "ret_1y": ret_1y * 100, "max_dd": float(dd) * 100,
+            "calmar": calmar,
+        }
+    except Exception:
+        return None
+
+
+def _detectar_sr(hist, precio, n_pivots=10, tol=0.02):
+    """
+    Detecta soportes y resistencias por pivots (mín/máx locales de 10 días)
+    agrupando niveles que disten <2% entre sí. Más toques = nivel más fuerte.
+    Devuelve (soportes, resistencias): listas de dicts {"nivel", "toques"}
+    ordenadas por cercanía al precio actual.
+    """
+    try:
+        h = hist["High"] if "High" in hist.columns else hist["Close"]
+        l = hist["Low"]  if "Low"  in hist.columns else hist["Close"]
+        h = h.dropna(); l = l.dropna()
+        if len(h) < 40:
+            return [], []
+
+        piv_max, piv_min = [], []
+        w = 5  # ventana del pivot: máximo/mínimo de 11 días centrado
+        for i in range(w, len(h) - w):
+            seg_h = h.iloc[i-w:i+w+1]
+            seg_l = l.iloc[i-w:i+w+1]
+            if h.iloc[i] == seg_h.max():
+                piv_max.append(float(h.iloc[i]))
+            if l.iloc[i] == seg_l.min():
+                piv_min.append(float(l.iloc[i]))
+
+        def agrupar(niveles):
+            niveles = sorted(niveles)
+            grupos = []
+            for n in niveles:
+                if grupos and abs(n / grupos[-1]["nivel"] - 1) < tol:
+                    g = grupos[-1]
+                    g["nivel"] = (g["nivel"] * g["toques"] + n) / (g["toques"] + 1)
+                    g["toques"] += 1
+                else:
+                    grupos.append({"nivel": n, "toques": 1})
+            return grupos
+
+        soportes = [g for g in agrupar(piv_min) if g["nivel"] < precio]
+        resist   = [g for g in agrupar(piv_max) if g["nivel"] > precio]
+        # Ordenar por cercanía al precio
+        soportes.sort(key=lambda g: precio - g["nivel"])
+        resist.sort(key=lambda g: g["nivel"] - precio)
+        return soportes[:3], resist[:3]
+    except Exception:
+        return [], []
+
+
+def _plan_operativo(precio, atr, capital, riesgo_pct, entrada=None):
+    """
+    Genera plan operativo: entrada, stop (2xATR cap -15%), TP1/TP2,
+    nº acciones según riesgo por operación, e inversión total.
+    Stop anclado al precio de ENTRADA, no al de mercado.
+    """
+    entrada = entrada if entrada else precio
+    stop = entrada - 2 * atr
+    # Cap del stop al -15% (regla dura)
+    stop = max(stop, entrada * 0.85)
+    riesgo_accion = entrada - stop
+    if riesgo_accion <= 0:
+        return None
+    riesgo_eur = capital * riesgo_pct / 100
+    shares = int(riesgo_eur / riesgo_accion)
+    inversion = shares * entrada
+    # Cap de concentración: máx 25% del capital en una posición
+    if inversion > capital * 0.25 and entrada > 0:
+        shares = int(capital * 0.25 / entrada)
+        inversion = shares * entrada
+    tp1 = entrada + 2 * (entrada - stop)   # R/R 2:1
+    tp2 = entrada + 4 * (entrada - stop)   # R/R 4:1
+    return {
+        "entrada": entrada, "stop": stop,
+        "stop_pct": (stop / entrada - 1) * 100,
+        "tp1": tp1, "tp2": tp2,
+        "shares": shares, "inversion": inversion,
+        "riesgo_eur": shares * riesgo_accion,
+    }
+
+
 if pagina == "🌅 Outlook":
     st.header("🌅 Resumen Ejecutivo del Mercado")
     st.markdown("Vista de 30 segundos: índices clave, sectores, watchlist, eventos macro y noticias.")
@@ -1781,10 +2016,22 @@ if pagina == "🌅 Outlook":
         "Bitcoin":      ("BTC-USD", "₿",  "Criptomoneda principal"),
     }
 
-    with st.spinner("Descargando datos del mercado..."):
+    with st.spinner("Cargando estado del mercado..."):
         market_data = {}
+        tickers_m = tuple(v[0] for v in market_metrics.values())
+
+        # Bulk cacheado (5 min): tras la primera carga es instantáneo
+        try:
+            datos_bulk = _outlook_mercado_bulk(tickers_m)
+        except Exception:
+            datos_bulk = {}
+
         for nombre, (ticker, emoji, desc) in market_metrics.items():
-            precio, cambio, err = _get_cambio_dia(ticker)
+            if ticker in datos_bulk:
+                precio, cambio = datos_bulk[ticker]
+            else:
+                # Fallback individual (también cacheado)
+                precio, cambio, _err = _get_cambio_dia(ticker)
             if precio is not None and cambio is not None:
                 market_data[nombre] = {
                     "precio": precio, "cambio": cambio, "emoji": emoji,
@@ -1806,6 +2053,34 @@ if pagina == "🌅 Outlook":
                   <div style="font-size:12px;color:{color};margin-top:2px;font-weight:bold">{datos['cambio']:+.2f}%</div>
                 </div>
                 """, unsafe_allow_html=True)
+
+        # ── Señal de velocidad del 10Y (regla 2σ Goldman Sachs) ──────
+        v10 = calcular_velocidad_10y()
+        if v10:
+            z_abs = abs(v10["z"])
+            if z_abs >= 2:
+                v_color, v_icon = "#ff5555", "🔴"
+                v_msg = (f"**Movimiento extremo de tipos**: el 10Y se ha movido "
+                         f"{v10['cambio_bp']:+.0f}pb en 1 mes ({v10['z']:+.1f}σ). "
+                         f"Históricamente, movimientos >2σ generan retornos negativos "
+                         f"del S&P 500 a 1 mes — prudencia con nuevas entradas.")
+            elif z_abs >= 1.5:
+                v_color, v_icon = "#ffb86c", "🟡"
+                v_msg = (f"**Tipos moviéndose rápido**: {v10['cambio_bp']:+.0f}pb en 1 mes "
+                         f"({v10['z']:+.1f}σ). Aún no extremo, pero vigilar.")
+            else:
+                v_color, v_icon = "#50fa7b", "🟢"
+                v_msg = (f"**Tipos estables**: el 10Y se ha movido {v10['cambio_bp']:+.0f}pb "
+                         f"en el último mes ({v10['z']:+.1f}σ) — sin señal de estrés. "
+                         f"Recuerda: lo que daña a la bolsa no es el nivel de tipos, "
+                         f"sino su velocidad de cambio.")
+            st.markdown(
+                f"<div style='background:#1a1a2e;border-left:4px solid {v_color};"
+                f"padding:12px 14px;border-radius:6px;margin:10px 0'>"
+                f"<span style='font-size:14px;color:#e8e8e8'>{v_icon} {v_msg}</span><br>"
+                f"<span style='font-size:11px;color:#888'>10Y actual: {v10['nivel']:.2f}% · "
+                f"σ mensual (3a): {v10['sigma_bp']:.0f}pb · Fuente: FRED DGS10 + metodología Goldman Sachs</span>"
+                f"</div>", unsafe_allow_html=True)
 
         # Selector de índice para ver gráfico
         sel_idx = st.selectbox(
@@ -1908,44 +2183,37 @@ if pagina == "🌅 Outlook":
         "Comunicación":  ["GOOGL","META","NFLX","DIS","TMUS","T","VZ","CMCSA","CHTR","WBD","EA","TTWO","DASH","SPOT","ROKU"],
     }
 
-    # Calcular rendimientos HOY y YTD
+    # Calcular rendimientos HOY, 1M, 3M, 6M y YTD — descarga BULK (1 llamada)
     sector_data = []
     today_year = datetime.now().year
     ytd_start  = datetime(today_year, 1, 1).strftime("%Y-%m-%d")
 
-    with st.spinner("Analizando sectores (Hoy y YTD)..."):
+    with st.spinner("Analizando sectores..."):
+        try:
+            datos_sec = _outlook_sectores_bulk(tuple(sector_etfs.values()), ytd_start)
+        except Exception:
+            datos_sec = {}
+
         for nombre, ticker in sector_etfs.items():
-            try:
-                # YTD: descargar desde 1 enero
-                h_ytd, _ = descargar(ticker, "1y")
-                if h_ytd.empty:
-                    continue
-
-                precio_hoy = float(h_ytd["Close"].iloc[-1])
-                cambio_dia = (precio_hoy / float(h_ytd["Close"].iloc[-2]) - 1) * 100 if len(h_ytd) >= 2 else 0
-
-                # YTD: buscar primer día del año actual
-                h_ytd_idx = h_ytd[h_ytd.index >= ytd_start]
-                if not h_ytd_idx.empty:
-                    precio_inicio = float(h_ytd_idx["Close"].iloc[0])
-                    ytd = (precio_hoy / precio_inicio - 1) * 100
-                else:
-                    ytd = None
-
-                sector_data.append({
-                    "Sector":   nombre,
-                    "Ticker":   ticker,
-                    "Hoy %":    round(cambio_dia, 2),
-                    "YTD %":    round(ytd, 2) if ytd is not None else None,
-                })
-            except Exception:
+            d = datos_sec.get(ticker)
+            if d is None:
                 continue
+            sector_data.append({
+                "Sector":   nombre,
+                "Ticker":   ticker,
+                "Hoy %":    round(d["hoy"], 2),
+                "1M %":     round(d["1m"], 1) if d["1m"] is not None else None,
+                "3M %":     round(d["3m"], 1) if d["3m"] is not None else None,
+                "6M %":     round(d["6m"], 1) if d["6m"] is not None else None,
+                "YTD %":    round(d["ytd"], 2) if d["ytd"] is not None else None,
+            })
 
     if sector_data:
         df_sect = pd.DataFrame(sector_data)
 
-        # Pestañas: HOY vs YTD
-        tab_hoy, tab_ytd = st.tabs(["📅 Hoy", "📆 YTD (Año a la fecha)"])
+        # Pestañas: HOY vs YTD vs Fuerza Relativa
+        tab_hoy, tab_ytd, tab_fr = st.tabs(
+            ["📅 Hoy", "📆 YTD (Año a la fecha)", "💪 Fuerza relativa"])
 
         with tab_hoy:
             df_h = df_sect.sort_values("Hoy %", ascending=False)
@@ -2001,6 +2269,31 @@ if pagina == "🌅 Outlook":
                 )
                 st.plotly_chart(fig_ytd, use_container_width=True,
                                 config={"displayModeBar": False})
+
+        with tab_fr:
+            st.caption(
+                "Tendencias en curso: un sector líder en TODOS los plazos tiene "
+                "fuerza persistente — donde el momentum funciona mejor. "
+                "Verde en 1M pero rojo en 6M = posible giro incipiente."
+            )
+            cols_fr = ["Sector", "1M %", "3M %", "6M %", "YTD %"]
+            df_fr = df_sect[[c for c in cols_fr if c in df_sect.columns]].copy()
+            # Ranking medio entre periodos (fuerza relativa compuesta)
+            rank_cols = [c for c in ["1M %", "3M %", "6M %"] if c in df_fr.columns]
+            if rank_cols:
+                df_fr["Rank FR"] = df_fr[rank_cols].rank(ascending=False).mean(axis=1).round(1)
+                df_fr = df_fr.sort_values("Rank FR")
+            st.dataframe(
+                df_fr.style.map(_color_pct,
+                    subset=[c for c in ["1M %","3M %","6M %","YTD %"] if c in df_fr.columns]),
+                use_container_width=True, hide_index=True,
+                height=60 + 36 * len(df_fr)
+            )
+            if rank_cols and len(df_fr) >= 3:
+                lider = df_fr.iloc[0]["Sector"]
+                cola  = df_fr.iloc[-1]["Sector"]
+                st.markdown(f"💪 **Liderazgo persistente:** {lider} · "
+                            f"📉 **Más débil:** {cola}")
 
         # ── Drill-down: ver acciones del sector ──────────────────────
         st.markdown("#### 🔍 Ver acciones de un sector")
@@ -2069,20 +2362,13 @@ if pagina == "🌅 Outlook":
         with st.spinner(f"Cargando {len(df_wl_o)} tickers..."):
             try:
                 tickers_wl = df_wl_o["ticker"].tolist()
-                # Descargar 6 meses para tener historial desde el alta de cualquier ticker
-                if len(tickers_wl) == 1:
-                    h_t, _ = descargar(tickers_wl[0], "6mo")
-                    hist_dict = {tickers_wl[0]: h_t} if not h_t.empty else {}
-                else:
-                    bulk = yf.download(tickers_wl, period="6mo",
-                                       auto_adjust=True, progress=False)
-                    hist_dict = {}
-                    if isinstance(bulk.columns, pd.MultiIndex):
-                        for t in tickers_wl:
-                            if t in bulk.columns.get_level_values(1):
-                                c = bulk["Close"][t].dropna()
-                                if not c.empty:
-                                    hist_dict[t] = pd.DataFrame({"Close": c})
+                # Bulk cacheado 5 min — instantáneo tras la primera carga
+                try:
+                    closes_wl = _outlook_watchlist_bulk(tuple(tickers_wl))
+                except Exception:
+                    closes_wl = {}
+                hist_dict = {t: pd.DataFrame({"Close": c})
+                             for t, c in closes_wl.items()}
 
                 wl_rows = []
                 for _, row_db in df_wl_o.iterrows():
@@ -2295,7 +2581,7 @@ if pagina == "🌅 Outlook":
         with tab_news_global:
             with st.spinner("Cargando noticias generales..."):
                 try:
-                    news_general = fh_client.general_news("general", min_id=0)
+                    news_general = _news_general_cached()
                     if news_general:
                         for n in news_general[:8]:
                             fecha_n = datetime.fromtimestamp(n.get("datetime", 0)).strftime("%d-%m %H:%M") \
@@ -2348,7 +2634,7 @@ if pagina == "🌅 Outlook":
                         todas = []
                         for t in tickers_us:
                             try:
-                                items = fh_client.company_news(t, _from=week_ago_str, to=today_str)
+                                items = _news_company_cached(t, week_ago_str, today_str)
                                 for n in items[:3]:
                                     todas.append({
                                         "ticker":  t,
@@ -2396,72 +2682,280 @@ if pagina == "🌅 Outlook":
     st.divider()
     st.caption(f"🕐 Última actualización: {datetime.now().strftime('%H:%M %d-%m-%Y')}")
 
+
 elif pagina == "🔍 Screener":
+    # ═══════════════════════════════════════════════════════════════
+    # SCREENER v2 — Estrategias de precio, volumen y ATR
+    # Bulk download (rápido) + plan operativo con position sizing
+    # ═══════════════════════════════════════════════════════════════
+    ESTRATEGIAS = {
+        "📐 Momentum Sistemático": (
+            "Compra fuerza persistente: retorno de 12 meses excluyendo el último "
+            "(el 'momentum 12-1' académico), ranqueado por Calmar ratio. "
+            "Parámetros 252/21/top-10 validados con Deflated Sharpe Ratio y walk-forward "
+            "(CAGR histórico 22.6% vs SPY 13.9%)."
+        ),
+        "🔄 Pullback en tendencia": (
+            "Compra retrocesos sanos dentro de tendencias alcistas: precio sobre MA200, "
+            "MA50 sobre MA200, precio tocando la MA50 (±3%) y RSI entre 35-55 "
+            "(retroceso, no desplome). El clásico 'comprar el dip' con reglas."
+        ),
+        "🚀 Breakout con volumen": (
+            "Compra rupturas confirmadas: precio supera el máximo de 60 días "
+            "con volumen al menos 1.5× su media. El volumen valida que la ruptura "
+            "tiene demanda real detrás."
+        ),
+        "🔧 Filtros manuales": (
+            "Construye tu propio filtro combinando momentum, RSI, tendencia, "
+            "volumen relativo y volatilidad (ATR%)."
+        ),
+    }
+
     with st.sidebar:
-        indice  = st.selectbox("Índice", list(INDICES.keys()), format_func=lambda x: INDICES[x][0])
-        modo    = st.selectbox("Modo", ["VALUE","MOMENTUM","QUALITY","DIVIDENDOS","TODO"])
-        limite  = st.slider("Tickers a analizar", 10, 500, 50, step=10,
-                            help="Más tickers = análisis más completo pero más lento")
-        st.divider()
-        ejecutar = st.button("🚀 Ejecutar análisis", type="primary", use_container_width=True)
+        indice = st.selectbox("Índice", list(INDICES.keys()),
+                              format_func=lambda x: INDICES[x][0])
+        estrategia = st.selectbox("Estrategia", list(ESTRATEGIAS.keys()))
 
-        # Descargar lista de tickers del índice seleccionado
         st.divider()
-        st.caption("📋 Lista de tickers del índice")
-        tickers_idx = INDICES[indice][1]()
-        df_lista = pd.DataFrame({"Ticker": tickers_idx})
-        st.download_button(
-            f"📥 Descargar {len(tickers_idx)} tickers",
-            df_lista.to_csv(index=False).encode("utf-8"),
-            f"tickers_{indice}.csv",
-            "text/csv",
-            use_container_width=True
-        )
+        st.markdown("**💰 Gestión del riesgo**")
+        capital    = st.number_input("Capital disponible ($)", 1000, 10000000, 10000, step=1000)
+        riesgo_pct = st.slider("Riesgo por operación (%)", 0.5, 3.0, 1.0, 0.25,
+                               help="% del capital que pierdes si salta el stop. 1% es el estándar profesional.")
 
-    st.header(f"🔍 Screener: {INDICES[indice][0]} — {modo}")
-    if ejecutar:
-        with st.spinner("Obteniendo tickers..."):
-            tickers = INDICES[indice][1]()
-        if not tickers:
-            st.error("No se pudieron obtener tickers.")
-        else:
-            ta = tickers[:limite]
-            res = []
-            pb = st.progress(0)
-            for i, t in enumerate(ta):
-                pb.progress((i + 1) / len(ta), text=f"{t} ({i+1}/{len(ta)})")
-                r = analizar_screener(t)
-                if r: res.append(r)
-                if i % 3 == 2: time.sleep(1)
-            pb.empty()
-            if not res:
-                st.error("Sin resultados. Yahoo Finance puede estar limitando. Intenta con menos tickers.")
+        # Filtros manuales solo si aplica
+        if estrategia == "🔧 Filtros manuales":
+            st.divider()
+            st.markdown("**🔧 Filtros**")
+            f_mom3_min  = st.slider("Momentum 3M mínimo (%)", -50, 50, 0)
+            f_rsi       = st.slider("RSI entre", 0, 100, (35, 70))
+            f_vol_rel   = st.slider("Volumen relativo mínimo", 0.0, 5.0, 0.0, 0.25)
+            f_atr_max   = st.slider("ATR% máximo (volatilidad)", 1.0, 20.0, 10.0, 0.5,
+                                    help="Excluye chicharros: ATR% alto = movimientos diarios salvajes")
+            f_tendencia = st.checkbox("Solo tendencia alcista (precio>MA50>MA200)", value=True)
+
+        limite = st.slider("Tickers a analizar", 50, 600, 200, step=50)
+        st.divider()
+        ejecutar = st.button("🚀 Ejecutar screener", type="primary", use_container_width=True)
+
+    st.header(f"🔍 Screener — {estrategia}")
+    st.markdown(f"*{ESTRATEGIAS[estrategia]}*")
+
+    if not ejecutar:
+        st.info("👈 Elige estrategia, define tu capital y riesgo, y pulsa **Ejecutar**.")
+        st.markdown("""
+        **Cómo funciona el plan operativo de cada resultado:**
+        - 🛑 **Stop loss** = entrada − 2×ATR (máximo -15%). El ATR mide la volatilidad
+          real del valor: un stop a 2×ATR aguanta el ruido normal sin salirte por nada.
+        - 📏 **Tamaño de posición** = tu riesgo por operación (€) ÷ distancia al stop.
+          Así, si salta el stop, pierdes exactamente lo que decidiste arriesgar — ni más ni menos.
+        - 🎯 **TP1 / TP2** = objetivos a ratio 2:1 y 4:1 sobre el riesgo asumido.
+        """)
+        st.stop()
+
+    # ── Descarga bulk ────────────────────────────────────────────
+    with st.spinner("Obteniendo tickers del índice..."):
+        tickers = INDICES[indice][1]()
+    if not tickers:
+        st.error("No se pudieron obtener tickers.")
+        st.stop()
+
+    ta = tickers[:limite]
+    with st.spinner(f"Descargando 2 años de {len(ta)} tickers (bulk)..."):
+        try:
+            raw = yf.download(ta, period="2y", auto_adjust=True,
+                              progress=False, group_by="column")
+        except Exception as e:
+            st.error(f"Error en descarga bulk: {e}")
+            st.stop()
+
+    if raw.empty:
+        st.error("Descarga vacía. Reintenta en 1-2 minutos (posible rate limit).")
+        st.stop()
+
+    # ── Calcular métricas por ticker ─────────────────────────────
+    resultados = []
+    multi = isinstance(raw.columns, pd.MultiIndex)
+    pb = st.progress(0, text="Calculando métricas...")
+    for i, t in enumerate(ta):
+        if i % 25 == 0:
+            pb.progress(min((i + 1) / len(ta), 1.0), text=f"Analizando {t}...")
+        try:
+            if multi:
+                cols_t = {}
+                for campo in ["Close", "High", "Low", "Volume"]:
+                    if campo in raw.columns.get_level_values(0) and \
+                       t in raw[campo].columns:
+                        cols_t[campo] = raw[campo][t]
+                if "Close" not in cols_t:
+                    continue
+                df_t = pd.DataFrame(cols_t).dropna(subset=["Close"])
             else:
-                df_raw = pd.DataFrame(res)
-                df_f   = filtrar(df_raw, modo).sort_values("Score", ascending=False).reset_index(drop=True)
-                st.subheader(f"{len(df_f)} de {len(df_raw)} activos")
-                if df_f.empty:
-                    st.warning("Ningún activo cumple los filtros.")
+                df_t = raw.dropna(subset=["Close"])
+
+            m = _screener_metricas(df_t)
+            if m is None:
+                continue
+            m["ticker"] = t
+            resultados.append(m)
+        except Exception:
+            continue
+    pb.empty()
+
+    if not resultados:
+        st.error("Sin métricas calculables. Reintenta con otro índice o en unos minutos.")
+        st.stop()
+
+    df_m = pd.DataFrame(resultados)
+    st.caption(f"📊 {len(df_m)} de {len(ta)} tickers con datos suficientes")
+
+    # ── Aplicar estrategia ───────────────────────────────────────
+    seleccion = pd.DataFrame()
+
+    if estrategia == "📐 Momentum Sistemático":
+        # Momentum 12-1 positivo, ranking por Calmar, top 10
+        cand = df_m.dropna(subset=["mom_12_1", "calmar"])
+        cand = cand[cand["mom_12_1"] > 0]
+        if cand.empty:
+            st.warning("⚠️ Ningún valor con momentum 12-1 positivo. "
+                       "Históricamente esto sugiere mercado bajista: la estrategia "
+                       "indica quedarse en renta fija este mes.")
+            st.stop()
+        seleccion = cand.sort_values("calmar", ascending=False).head(10).copy()
+        seleccion["Señal"] = "Momentum 12-1 +" + seleccion["mom_12_1"].round(1).astype(str) + "%"
+        if len(seleccion) < 10:
+            st.info(f"ℹ️ Solo {len(seleccion)} valores con momentum positivo — "
+                    f"la estrategia invierte solo en esos (peso igual).")
+
+    elif estrategia == "🔄 Pullback en tendencia":
+        cand = df_m.dropna(subset=["ma200", "rsi"])
+        cand = cand[
+            (cand["precio"] > cand["ma200"]) &
+            (cand["ma50"] > cand["ma200"]) &
+            (cand["precio"] >= cand["ma50"] * 0.97) &
+            (cand["precio"] <= cand["ma50"] * 1.03) &
+            (cand["rsi"] >= 35) & (cand["rsi"] <= 55)
+        ].copy()
+        if cand.empty:
+            st.warning("Sin pullbacks limpios ahora mismo. Es normal: esta señal "
+                       "aparece pocas veces — cuando aparece suele ser de calidad.")
+            st.stop()
+        # Mejor cuanto más cerca de la MA50 y mejor tendencia de fondo
+        cand["dist_ma50"] = (cand["precio"] / cand["ma50"] - 1).abs()
+        seleccion = cand.sort_values(["dist_ma50"]).head(15).copy()
+        seleccion["Señal"] = "Pullback a MA50 · RSI " + seleccion["rsi"].round(0).astype(int).astype(str)
+        # Para pullback la entrada óptima ES la MA50
+        seleccion["entrada_custom"] = seleccion["ma50"]
+
+    elif estrategia == "🚀 Breakout con volumen":
+        cand = df_m.dropna(subset=["high_60_prev", "vol_rel"])
+        cand = cand[
+            (cand["precio"] >= cand["high_60_prev"]) &
+            (cand["vol_rel"] >= 1.5) &
+            (cand["atr_pct"] < 8)
+        ].copy()
+        if cand.empty:
+            st.warning("Sin breakouts con volumen hoy. Las rupturas válidas no ocurren "
+                       "todos los días — mejor esperar que forzar.")
+            st.stop()
+        seleccion = cand.sort_values("vol_rel", ascending=False).head(15).copy()
+        seleccion["Señal"] = "Breakout 60d · Vol ×" + seleccion["vol_rel"].round(1).astype(str)
+
+    else:  # Filtros manuales
+        cand = df_m.copy()
+        if f_tendencia:
+            cand = cand.dropna(subset=["ma200"])
+            cand = cand[(cand["precio"] > cand["ma50"]) & (cand["ma50"] > cand["ma200"])]
+        cand = cand.dropna(subset=["mom_3m", "rsi", "atr_pct"])
+        cand = cand[
+            (cand["mom_3m"] >= f_mom3_min) &
+            (cand["rsi"] >= f_rsi[0]) & (cand["rsi"] <= f_rsi[1]) &
+            (cand["atr_pct"] <= f_atr_max)
+        ]
+        if f_vol_rel > 0:
+            cand = cand.dropna(subset=["vol_rel"])
+            cand = cand[cand["vol_rel"] >= f_vol_rel]
+        if cand.empty:
+            st.warning("Ningún valor cumple los filtros. Relájalos un poco.")
+            st.stop()
+        seleccion = cand.sort_values("mom_3m", ascending=False).head(25).copy()
+        seleccion["Señal"] = "Filtro manual · Mom3M " + seleccion["mom_3m"].round(1).astype(str) + "%"
+
+    # ── Construir tabla con plan operativo ───────────────────────
+    filas = []
+    for _, r in seleccion.iterrows():
+        entrada = r.get("entrada_custom", r["precio"])
+        plan = _plan_operativo(r["precio"], r["atr"], capital, riesgo_pct,
+                                entrada=entrada)
+        if plan is None:
+            continue
+        filas.append({
+            "Ticker":       r["ticker"],
+            "Señal":        r["Señal"],
+            "Precio":       round(r["precio"], 2),
+            "Entrada":      round(plan["entrada"], 2),
+            "Stop":         round(plan["stop"], 2),
+            "Stop %":       round(plan["stop_pct"], 1),
+            "TP1":          round(plan["tp1"], 2),
+            "TP2":          round(plan["tp2"], 2),
+            "Acciones":     plan["shares"],
+            "Inversión $":  round(plan["inversion"], 0),
+            "Riesgo $":     round(plan["riesgo_eur"], 0),
+            "Mom 3M %":     round(r["mom_3m"], 1) if pd.notna(r.get("mom_3m")) else None,
+            "RSI":          round(r["rsi"], 0) if pd.notna(r.get("rsi")) else None,
+            "ATR %":        round(r["atr_pct"], 1) if pd.notna(r.get("atr_pct")) else None,
+            "Calmar":       round(r["calmar"], 2) if pd.notna(r.get("calmar")) else None,
+        })
+
+    if not filas:
+        st.warning("No se pudo generar plan operativo para los candidatos.")
+        st.stop()
+
+    df_out = pd.DataFrame(filas)
+
+    # Resumen de cartera propuesta
+    inv_total = df_out["Inversión $"].sum()
+    riesgo_total = df_out["Riesgo $"].sum()
+    col_r1, col_r2, col_r3, col_r4 = st.columns(4)
+    col_r1.metric("Candidatos", len(df_out))
+    col_r2.metric("Inversión total", f"${inv_total:,.0f}")
+    col_r3.metric("% del capital", f"{inv_total/capital*100:.0f}%")
+    col_r4.metric("Riesgo total si saltan stops", f"${riesgo_total:,.0f}")
+
+    if inv_total > capital:
+        st.warning(f"⚠️ La inversión propuesta (${inv_total:,.0f}) supera tu capital. "
+                   f"Elige menos posiciones o reduce el riesgo por operación.")
+
+    st.dataframe(
+        df_out.style.map(_color_pct, subset=["Mom 3M %","Stop %"]),
+        use_container_width=True, hide_index=True,
+        height=min(550, 60 + 36 * len(df_out))
+    )
+
+    st.caption(
+        "💡 **Cómo leer la tabla:** compra 'Acciones' a precio 'Entrada', "
+        "pon el stop en 'Stop' y vende la mitad en TP1 y el resto en TP2. "
+        "Si salta el stop pierdes 'Riesgo $' — exactamente lo que configuraste."
+    )
+
+    # Botones de seguimiento por ticker
+    st.markdown("#### ⭐ Añadir a watchlist")
+    cols_btns = st.columns(min(5, len(df_out)))
+    for i, (_, row_btn) in enumerate(df_out.head(10).iterrows()):
+        with cols_btns[i % len(cols_btns)]:
+            if st.button(f"⭐ {row_btn['Ticker']}", key=f"scr_wl_{row_btn['Ticker']}",
+                          use_container_width=True):
+                nota_wl = f"Screener {estrategia} | {row_btn['Señal']} | Stop: {row_btn['Stop']}"
+                if watchlist_add(row_btn["Ticker"], row_btn["Precio"], nota_wl):
+                    st.success(f"✅ {row_btn['Ticker']} añadido")
                 else:
-                    cols_show = ["Ticker","Precio","Score","Label","Mom 3M %","Vol/Avg 20d",
-                                 "PER","ROE %","Margen Net %","Potencial %","MktCap (B$)"]
-                    cols_show = [c for c in cols_show if c in df_f.columns]
-                    st.dataframe(df_f[cols_show], use_container_width=True, height=500)
-                    st.caption("📡 Precios: Finnhub / Yahoo Finance | Tickers: Wikipedia")
-                    dv = df_f.dropna(subset=["Mom 3M %"]).head(25)
-                    if not dv.empty:
-                        fig = px.scatter(dv, x="Mom 3M %", y="Score", color="Label",
-                                         color_discrete_map=CL, hover_data=["Ticker","PER"],
-                                         text="Ticker", title="Momentum vs Score")
-                        fig.update_traces(textposition="top center", textfont_size=9)
-                        fig.update_layout(template="plotly_dark", height=450,
-                                          paper_bgcolor="#12121f", plot_bgcolor="#1e1e2e")
-                        st.plotly_chart(fig, use_container_width=True)
-                    st.session_state["screener_results"] = df_f
-                    st.download_button("📥 CSV", df_f.to_csv(index=False).encode("utf-8"),
-                                       f"screener_{indice}_{modo}.csv", "text/csv")
-    else:
-        st.info("👈 Configura y pulsa **Ejecutar**.")
+                    st.info("Ya estaba")
+
+    st.download_button("📥 Descargar plan completo (CSV)",
+                       df_out.to_csv(index=False).encode("utf-8"),
+                       f"screener_{estrategia.split()[1]}_{datetime.now().strftime('%Y%m%d')}.csv",
+                       "text/csv")
+
+    st.session_state["screener_results"] = df_out
 
 
 # ╔═══════════════════════════════════════════════════════════════╗
@@ -2514,6 +3008,16 @@ elif pagina == "🔎 Descubrimiento":
 
         top_n = st.slider("Top resultados", min_value=5, max_value=30, value=10)
 
+        st.divider()
+
+        st.divider()
+        st.markdown("**💰 Para el plan operativo**")
+        st.session_state["disc_capital"] = st.number_input(
+            "Capital ($)", 1000, 10000000,
+            st.session_state.get("disc_capital", 10000), step=1000, key="disc_cap_in")
+        st.session_state["disc_riesgo"] = st.slider(
+            "Riesgo por operación (%)", 0.5, 3.0,
+            st.session_state.get("disc_riesgo", 1.0), 0.25, key="disc_rsk_in")
         st.divider()
         analizar_btn = st.button("🚀 Analizar ahora", type="primary",
                                   use_container_width=True)
@@ -2600,6 +3104,16 @@ elif pagina == "🔎 Descubrimiento":
             except Exception:
                 pass
 
+            # ATR 14 (para plan operativo)
+            atr_val = None
+            try:
+                tr_d = pd.concat([highs_s - lows_s,
+                                  (highs_s - closes.shift(1)).abs(),
+                                  (lows_s  - closes.shift(1)).abs()], axis=1).max(axis=1)
+                atr_val = float(tr_d.rolling(14).mean().iloc[-1])
+            except Exception:
+                pass
+
             # Alpha vs SPY
             alpha = round(ret_d - spy_chg, 2) if spy_chg is not None else None
 
@@ -2654,6 +3168,7 @@ elif pagina == "🔎 Descubrimiento":
                 "Mom 20d %":    round(mom_20d, 1),
                 "vs MA50 %":    round((precio/ma50_val-1)*100, 1) if ma50_val else None,
                 "Score":        round(score, 1),
+                "ATR":          round(atr_val, 2) if atr_val else None,
                 "Señales":      " + ".join(scores.keys()),
                 "Principal":    max(scores.items(), key=lambda x: x[1])[0],
                 "_scores":      scores,
@@ -2907,6 +3422,28 @@ elif pagina == "🔎 Descubrimiento":
 
                     st.markdown(f"**Señales detectadas:** {r['Señales']}")
                     st.caption(f"💡 {SEÑAL_DESC.get(primary, '')}")
+
+                    # ── PLAN OPERATIVO — convierte la señal en algo invertible ──
+                    if r.get("ATR"):
+                        cap_disc  = st.session_state.get("disc_capital", 10000)
+                        rsk_disc  = st.session_state.get("disc_riesgo", 1.0)
+                        plan_d = _plan_operativo(r["Precio"], r["ATR"],
+                                                  cap_disc, rsk_disc)
+                        if plan_d and plan_d["shares"] > 0:
+                            st.markdown(
+                                f"<div style='background:#16213e;padding:10px;border-radius:6px;"
+                                f"margin:8px 0;border-left:3px solid #f1fa8c'>"
+                                f"<b style='color:#f1fa8c'>📋 Plan operativo</b> "
+                                f"<span style='color:#888;font-size:11px'>(capital ${cap_disc:,.0f}, riesgo {rsk_disc}%)</span><br>"
+                                f"<span style='color:#e8e8e8;font-size:13px'>"
+                                f"Comprar <b>{plan_d['shares']} acciones</b> a {plan_d['entrada']:.2f} "
+                                f"(inversión ${plan_d['inversion']:,.0f}) · "
+                                f"Stop: <b style='color:#ff5555'>{plan_d['stop']:.2f}</b> ({plan_d['stop_pct']:.1f}%) · "
+                                f"TP1: <b style='color:#50fa7b'>{plan_d['tp1']:.2f}</b> · "
+                                f"TP2: <b style='color:#50fa7b'>{plan_d['tp2']:.2f}</b><br>"
+                                f"Si salta el stop pierdes <b>${plan_d['riesgo_eur']:,.0f}</b>"
+                                f"</span></div>",
+                                unsafe_allow_html=True)
 
                     # Links de investigación
                     ticker_clean = ticker_r.split(".")[0]
@@ -3220,16 +3757,6 @@ elif pagina == "⭐ Watchlist":
         st.warning("No se pudieron obtener datos. Pulsa Actualizar.")
         st.stop()
 
-    # ── DIAGNÓSTICO: ver datos crudos de Sheets ─────────────────
-    with st.expander("🔬 Diagnóstico: ver datos crudos de Sheets", expanded=False):
-        st.write("**Contenido tal cual viene de Google Sheets:**")
-        st.dataframe(df_wl_db, use_container_width=True, hide_index=True)
-        st.write("**Tipos de datos por columna:**")
-        st.write(df_wl_db.dtypes.astype(str).to_dict())
-        st.write("**Valores únicos de `precio_inicial`:**")
-        for v in df_wl_db["precio_inicial"].tolist():
-            st.write(f"   • valor: `{v!r}`  tipo: `{type(v).__name__}`")
-
     # ── Construir tabla de tracking ──────────────────────────────
     rows = []
     for _, row_db in df_wl_db.iterrows():
@@ -3443,6 +3970,11 @@ elif pagina == "📈 Análisis Individual":
     with st.sidebar:
         ticker_in = st.text_input("Ticker", value="AAPL",
                                    help="Ej: AAPL, NESN.SW, 7203.T")
+        st.markdown("**💰 Para el plan de entrada**")
+        ai_capital = st.number_input("Capital ($)", 1000, 10000000, 10000,
+                                      step=1000, key="ai_cap")
+        ai_riesgo  = st.slider("Riesgo por operación (%)", 0.5, 3.0, 1.0, 0.25,
+                                key="ai_rsk")
         st.divider()
         go_btn = st.button("🚀 Analizar", type="primary", use_container_width=True)
 
@@ -3711,9 +4243,115 @@ elif pagina == "📈 Análisis Individual":
     # ═══════════════════════════════════════════════════════════════
     # TABS
     # ═══════════════════════════════════════════════════════════════
-    tab_resumen, tab_tecnico, tab_macro, tab_fundamental, tab_peers, tab_noticias = st.tabs([
-        "📋 Resumen", "📊 Técnico", "🌍 Macro", "💼 Fund.", "🆚 Peers", "📰 News"
+    tab_resumen, tab_entrada, tab_tecnico, tab_macro, tab_fundamental, tab_peers, tab_noticias = st.tabs([
+        "📋 Resumen", "🎯 Entrada", "📊 Técnico", "🌍 Macro", "💼 Fund.", "🆚 Peers", "📰 News"
     ])
+
+    # ─────────────────────────────────────────────────────────────
+    # TAB ENTRADA: escenarios de entrada testados en ESTE valor
+    # ─────────────────────────────────────────────────────────────
+    with tab_entrada:
+        if atr_v is None or atr_v <= 0:
+            st.warning("Sin ATR calculable para este ticker — no se puede generar plan de entrada.")
+        else:
+            st.markdown("#### 🎯 Tres formas de entrar — elige según tu estilo")
+            st.caption(f"Capital: ${ai_capital:,.0f} · Riesgo por operación: {ai_riesgo}% "
+                       f"(configurable en la barra lateral)")
+
+            closes_e = hist["Close"].astype(float)
+            highs_e  = hist["High"].astype(float) if "High" in hist.columns else closes_e
+            ma50_e   = float(closes_e.tail(50).mean())
+            high60_e = float(highs_e.tail(61).iloc[:-1].max()) if len(highs_e) > 61 else None
+
+            escenarios = []
+
+            # A) Entrada a mercado
+            plan_mkt = _plan_operativo(precio, atr_v, ai_capital, ai_riesgo)
+            if plan_mkt:
+                escenarios.append(("🟢 A mercado (ahora)", plan_mkt,
+                    "Compras hoy al precio actual. Sin esperar — pagas la inmediatez "
+                    "con un stop más lejano del soporte natural."))
+
+            # B) Pullback a MA50 (orden limitada) — solo si la MA50 está por debajo
+            if ma50_e < precio * 0.995:
+                plan_pb = _plan_operativo(precio, atr_v, ai_capital, ai_riesgo,
+                                           entrada=ma50_e)
+                if plan_pb:
+                    dist_pb = (ma50_e / precio - 1) * 100
+                    escenarios.append((f"🔵 Pullback a MA50 ({dist_pb:+.1f}%)", plan_pb,
+                        f"Orden limitada en {ma50_e:.2f}: esperas el retroceso a la media de "
+                        f"50 sesiones. Mejor precio y stop más cercano — a cambio, puede no llenarse."))
+
+            # C) Breakout (orden stop-buy) — solo si el máximo de 60d está por encima
+            if high60_e and high60_e > precio * 1.005:
+                entrada_bo = high60_e + 0.25 * atr_v
+                plan_bo = _plan_operativo(precio, atr_v, ai_capital, ai_riesgo,
+                                           entrada=entrada_bo)
+                if plan_bo:
+                    dist_bo = (entrada_bo / precio - 1) * 100
+                    escenarios.append((f"🟠 Breakout 60d ({dist_bo:+.1f}%)", plan_bo,
+                        f"Orden stop-buy en {entrada_bo:.2f} (máximo de 60 días + 0.25×ATR): "
+                        f"solo entras si el valor demuestra fuerza rompiendo. Pagas más caro "
+                        f"a cambio de confirmación."))
+
+            if not escenarios:
+                st.info("El precio actual no permite escenarios alternativos limpios "
+                        "(ej: ya está en máximos y sobre la MA50) — solo entrada a mercado.")
+
+            # Tabla comparativa
+            filas_e = []
+            for nombre_e, p, desc_e in escenarios:
+                filas_e.append({
+                    "Escenario":   nombre_e,
+                    "Entrada":     round(p["entrada"], 2),
+                    "Stop":        round(p["stop"], 2),
+                    "Stop %":      round(p["stop_pct"], 1),
+                    "TP1 (2:1)":   round(p["tp1"], 2),
+                    "TP2 (4:1)":   round(p["tp2"], 2),
+                    "Acciones":    p["shares"],
+                    "Inversión $": round(p["inversion"], 0),
+                    "Riesgo $":    round(p["riesgo_eur"], 0),
+                })
+            if filas_e:
+                st.dataframe(pd.DataFrame(filas_e), use_container_width=True,
+                             hide_index=True)
+                for nombre_e, _, desc_e in escenarios:
+                    st.markdown(f"**{nombre_e}** — {desc_e}")
+
+            st.divider()
+
+            # ── Backtest de las reglas de entrada en ESTE valor ──────
+            st.markdown("#### 🧪 ¿Funcionaron estas entradas en este valor?")
+            st.caption("Simulación sobre los últimos 2 años: entrada al cierre de la señal, "
+                       "stop 2×ATR gestionado con el mínimo diario, salida a 21 sesiones. "
+                       "Sin comisiones. Pocas señales = poca significancia estadística.")
+
+            col_bt1, col_bt2 = st.columns(2)
+            for col_bt, modo_bt, label_bt in [
+                (col_bt1, "pullback", "🔵 Pullback a MA50"),
+                (col_bt2, "breakout", "🟠 Breakout 60d"),
+            ]:
+                with col_bt:
+                    bt = _backtest_entradas(hist, modo=modo_bt)
+                    st.markdown(f"**{label_bt}**")
+                    if bt is None:
+                        st.caption("Histórico insuficiente (<260 sesiones)")
+                    elif bt["n"] == 0:
+                        st.caption("0 señales en 2 años — esta regla no aplica a este valor")
+                    else:
+                        c1, c2, c3 = st.columns(3)
+                        c1.metric("Señales", bt["n"])
+                        c2.metric("Aciertos", f"{bt['win_rate']:.0f}%")
+                        c3.metric("Ret. medio", f"{bt['ret_medio']:+.1f}%")
+                        st.caption(f"Mejor: {bt['mejor']:+.1f}% · Peor: {bt['peor']:+.1f}%")
+                        if bt["n"] < 5:
+                            st.caption("⚠️ Menos de 5 señales — tómalo como anécdota, no como estadística")
+
+            st.info("💡 **Cómo usar esto:** si el backtest de pullback en este valor tiene "
+                    "buen win rate y el precio está extendido sobre la MA50, la orden "
+                    "limitada suele ser la entrada de más calidad. Si el valor nunca da "
+                    "señales de pullback (tendencias muy fuertes), el breakout o la entrada "
+                    "a mercado con tamaño reducido son las alternativas.")
 
     # ─────────────────────────────────────────────────────────────
     # TAB 1: RESUMEN (decision-ready)
@@ -3777,78 +4415,132 @@ elif pagina == "📈 Análisis Individual":
 
         st.divider()
 
-        # NIVELES OPERATIVOS
-        st.markdown("### 🎯 Niveles operativos")
+        # ═══════════════════════════════════════════════════════════
+        # PLAN DE ENTRADA — soportes reales, stop inteligente, sizing
+        # ═══════════════════════════════════════════════════════════
+        st.markdown("### 🎯 Plan de entrada")
 
         if atr_v and ma50:
-            entrada_optima   = ma50
-            entrada_agresiva = precio
-            stop_loss        = precio - 2 * atr_v
-            objetivo_1       = precio + 2 * atr_v
-            objetivo_2       = precio + 4 * atr_v
-            target_consenso  = info.get("targetMeanPrice")
+            # Soportes y resistencias por pivots
+            soportes, resistencias = _detectar_sr(hist, precio)
+            sop1 = soportes[0]["nivel"] if soportes else None
 
-            risk   = precio - stop_loss
-            reward = objetivo_1 - precio
-            rr_ratio = reward / risk if risk > 0 else 0
+            # STOP INTELIGENTE: el mayor entre (2×ATR bajo precio) y
+            # (0.5×ATR bajo el soporte más cercano) — así el stop queda
+            # protegido DETRÁS de un nivel real, no en tierra de nadie.
+            stop_atr = precio - 2 * atr_v
+            stop_sop = (sop1 - 0.5 * atr_v) if sop1 else None
+            if stop_sop and stop_sop > stop_atr:
+                stop_loss, stop_tipo = stop_sop, f"soporte {sop1:.2f} − 0.5×ATR"
+            else:
+                stop_loss, stop_tipo = stop_atr, "2× ATR"
+            stop_loss = max(stop_loss, precio * 0.85)  # cap -15%
+            if stop_loss >= precio:
+                stop_loss = precio - 2 * atr_v
 
-            col_n1, col_n2, col_n3 = st.columns(3)
+            riesgo_accion = precio - stop_loss
+            objetivo_1 = precio + 2 * riesgo_accion   # R/R 2:1
+            objetivo_2 = precio + 4 * riesgo_accion   # R/R 4:1
+            res1 = resistencias[0]["nivel"] if resistencias else None
+            target_consenso = info.get("targetMeanPrice")
 
-            with col_n1:
-                st.markdown(
-                    f"<div style='background:#1e3a1e;padding:10px;border-radius:6px;margin-bottom:8px;border-left:3px solid #50fa7b'>"
-                    f"<div style='color:#50fa7b;font-weight:bold;font-size:12px'>🟢 Entrada óptima</div>"
-                    f"<div style='color:#ffffff;font-size:17px;font-weight:bold;margin-top:4px'>{entrada_optima:.2f} {moneda}</div>"
-                    f"<div style='font-size:11px;color:#bbb;margin-top:4px'>Test MA50 ({((entrada_optima/precio-1)*100):+.1f}%)</div>"
-                    f"</div>"
-                    f"<div style='background:#1e2e2a;padding:10px;border-radius:6px;border-left:3px solid #8be9fd'>"
-                    f"<div style='color:#8be9fd;font-weight:bold;font-size:12px'>🟢 Entrada agresiva</div>"
-                    f"<div style='color:#ffffff;font-size:17px;font-weight:bold;margin-top:4px'>{entrada_agresiva:.2f} {moneda}</div>"
-                    f"<div style='font-size:11px;color:#bbb;margin-top:4px'>Precio actual</div>"
-                    f"</div>", unsafe_allow_html=True)
+            # Position sizing
+            cap_ai = st.session_state.get("ai_cap", 10000)
+            rsk_ai = st.session_state.get("ai_rsk", 1.0)
+            riesgo_eur = cap_ai * rsk_ai / 100
+            shares = int(riesgo_eur / riesgo_accion) if riesgo_accion > 0 else 0
+            inversion = shares * precio
+            if inversion > cap_ai * 0.25 and precio > 0:
+                shares = int(cap_ai * 0.25 / precio)
+                inversion = shares * precio
+            riesgo_real = shares * riesgo_accion
 
-            with col_n2:
-                stop_pct = (stop_loss/precio - 1)*100
-                rr_color = "#50fa7b" if rr_ratio >= 2 else "#ffb86c" if rr_ratio < 1.5 else "#f1fa8c"
-                rr_label = "✅ Favorable" if rr_ratio >= 2 else "⚠️ Bajo" if rr_ratio < 1.5 else "🟡 Aceptable"
-                st.markdown(
-                    f"<div style='background:#3a1e1e;padding:10px;border-radius:6px;margin-bottom:8px;border-left:3px solid #ff5555'>"
-                    f"<div style='color:#ff5555;font-weight:bold;font-size:12px'>🛑 Stop loss</div>"
-                    f"<div style='color:#ffffff;font-size:17px;font-weight:bold;margin-top:4px'>{stop_loss:.2f} {moneda}</div>"
-                    f"<div style='font-size:11px;color:#bbb;margin-top:4px'>{stop_pct:+.1f}% (2× ATR)</div>"
-                    f"</div>"
-                    f"<div style='background:#1a1a2e;padding:10px;border-radius:6px;border-left:3px solid {rr_color}'>"
-                    f"<div style='color:{rr_color};font-weight:bold;font-size:12px'>⚖️ Risk/Reward</div>"
-                    f"<div style='color:#ffffff;font-size:17px;font-weight:bold;margin-top:4px'>{rr_ratio:.1f}</div>"
-                    f"<div style='font-size:11px;color:#bbb;margin-top:4px'>{rr_label}</div>"
-                    f"</div>", unsafe_allow_html=True)
+            rr_ratio = (objetivo_1 - precio) / riesgo_accion if riesgo_accion > 0 else 0
 
-            with col_n3:
-                obj1_pct = (objetivo_1/precio - 1)*100
-                obj2_pct = (objetivo_2/precio - 1)*100
-                st.markdown(
-                    f"<div style='background:#1e3a1e;padding:10px;border-radius:6px;margin-bottom:8px;border-left:3px solid #50fa7b'>"
-                    f"<div style='color:#50fa7b;font-weight:bold;font-size:12px'>🎯 TP1</div>"
-                    f"<div style='color:#ffffff;font-size:17px;font-weight:bold;margin-top:4px'>{objetivo_1:.2f} <span style='color:#50fa7b;font-size:13px'>({obj1_pct:+.1f}%)</span></div>"
-                    f"<div style='font-size:11px;color:#bbb;margin-top:4px'>R/R 2:1</div>"
-                    f"</div>"
-                    f"<div style='background:#1e3a1e;padding:10px;border-radius:6px;border-left:3px solid #50fa7b'>"
-                    f"<div style='color:#50fa7b;font-weight:bold;font-size:12px'>🎯 TP2</div>"
-                    f"<div style='color:#ffffff;font-size:17px;font-weight:bold;margin-top:4px'>{objetivo_2:.2f} <span style='color:#50fa7b;font-size:13px'>({obj2_pct:+.1f}%)</span></div>"
-                    f"<div style='font-size:11px;color:#bbb;margin-top:4px'>R/R 4:1</div>"
-                    f"</div>", unsafe_allow_html=True)
+            # ── Fila 1: niveles ──
+            col_n1, col_n2, col_n3, col_n4 = st.columns(4)
+            col_n1.metric("🟢 Entrada", f"{precio:.2f}",
+                          help="Precio actual. Entrada alternativa: test de la MA50 "
+                               f"en {ma50:.2f} ({(ma50/precio-1)*100:+.1f}%)")
+            col_n2.metric("🛑 Stop loss", f"{stop_loss:.2f}",
+                          delta=f"{(stop_loss/precio-1)*100:.1f}%",
+                          delta_color="off",
+                          help=f"Anclado a: {stop_tipo} (cap -15%)")
+            col_n3.metric("🎯 TP1 (R/R 2:1)", f"{objetivo_1:.2f}",
+                          delta=f"{(objetivo_1/precio-1)*100:+.1f}%")
+            col_n4.metric("🎯 TP2 (R/R 4:1)", f"{objetivo_2:.2f}",
+                          delta=f"{(objetivo_2/precio-1)*100:+.1f}%")
 
-                if target_consenso:
-                    tc_pct = (target_consenso/precio - 1)*100
-                    tc_color = "#50fa7b" if tc_pct > 0 else "#ff5555"
-                    st.markdown(
-                        f"<div style='background:#1e2e3a;padding:10px;border-radius:6px;border-left:3px solid #8be9fd;margin-top:8px'>"
-                        f"<div style='color:#8be9fd;font-weight:bold;font-size:12px'>📊 Target analistas</div>"
-                        f"<div style='color:#ffffff;font-size:17px;font-weight:bold;margin-top:4px'>{target_consenso:.2f} <span style='color:{tc_color};font-size:13px'>({tc_pct:+.1f}%)</span></div>"
-                        f"<div style='font-size:11px;color:#bbb;margin-top:4px'>Consenso</div>"
-                        f"</div>", unsafe_allow_html=True)
+            # ── Fila 2: tu posición en dinero real ──
+            st.markdown(
+                f"<div style='background:#16213e;padding:12px 14px;border-radius:8px;"
+                f"margin:8px 0;border-left:4px solid #f1fa8c'>"
+                f"<b style='color:#f1fa8c'>📋 Tu posición</b> "
+                f"<span style='color:#888;font-size:11px'>(capital ${cap_ai:,.0f} · riesgo {rsk_ai}%)</span><br>"
+                f"<span style='color:#e8e8e8;font-size:14px'>"
+                f"Comprar <b>{shares} acciones</b> = <b>${inversion:,.0f}</b> "
+                f"({inversion/cap_ai*100:.0f}% del capital)<br>"
+                f"🔴 Si salta el stop: <b>−${riesgo_real:,.0f}</b> · "
+                f"🟢 En TP1: <b>+${shares*(objetivo_1-precio):,.0f}</b> · "
+                f"🟢 En TP2: <b>+${shares*(objetivo_2-precio):,.0f}</b>"
+                f"</span></div>", unsafe_allow_html=True)
+
+            # ── Fila 3: niveles estructurales detectados ──
+            col_s1, col_s2 = st.columns(2)
+            with col_s1:
+                st.markdown("**🟦 Soportes detectados** *(pivots con más toques = más fuertes)*")
+                if soportes:
+                    for s in soportes:
+                        st.markdown(f"- `{s['nivel']:.2f}` ({(s['nivel']/precio-1)*100:+.1f}%) · {s['toques']} toques")
+                else:
+                    st.caption("Sin soportes claros bajo el precio")
+            with col_s2:
+                st.markdown("**🟥 Resistencias detectadas**")
+                if resistencias:
+                    for r_ in resistencias:
+                        st.markdown(f"- `{r_['nivel']:.2f}` ({(r_['nivel']/precio-1)*100:+.1f}%) · {r_['toques']} toques")
+                else:
+                    st.caption("Sin resistencias — precio en máximos (cielo abierto)")
+
+            # ── Checklist de entrada ──
+            st.markdown("#### ✅ Checklist de entrada")
+            checks = []
+            checks.append(("Tendencia alcista (precio > MA50 > MA200)",
+                           bool(ma200 and precio > ma50 > ma200) if ma200 else None))
+            if rsi_v is not None:
+                checks.append((f"RSI en zona operativa 40-70 (actual: {rsi_v:.0f})",
+                               40 <= rsi_v <= 70))
+            if res1:
+                dist_res = (res1 / precio - 1) * 100
+                checks.append((f"Recorrido a resistencia ≥5% (hay {dist_res:.1f}%)",
+                               dist_res >= 5))
+            else:
+                checks.append(("Sin resistencia cercana (en máximos)", True))
+            checks.append((f"R/R a TP1 ≥ 1.5 (actual: {rr_ratio:.1f})", rr_ratio >= 1.5))
+            atr_pct_v = atr_v / precio * 100
+            checks.append((f"Volatilidad controlada ATR% < 6 (actual: {atr_pct_v:.1f}%)",
+                           atr_pct_v < 6))
+            checks.append((f"Stop asumible > −12% (actual: {(stop_loss/precio-1)*100:.1f}%)",
+                           (stop_loss/precio-1)*100 > -12))
+
+            n_ok = sum(1 for _, ok in checks if ok is True)
+            n_tot = sum(1 for _, ok in checks if ok is not None)
+            for label, ok in checks:
+                icon = "✅" if ok is True else ("❌" if ok is False else "⚪")
+                st.markdown(f"{icon} {label}")
+
+            if n_ok == n_tot:
+                st.success(f"**{n_ok}/{n_tot}** — setup completo. Si el resto del análisis acompaña, es una entrada de libro.")
+            elif n_ok >= n_tot - 1:
+                st.info(f"**{n_ok}/{n_tot}** — setup aceptable. Valora esperar a que se complete el punto que falta.")
+            else:
+                st.warning(f"**{n_ok}/{n_tot}** — setup incompleto. La paciencia también es una posición.")
+
+            if target_consenso:
+                tc_pct = (target_consenso / precio - 1) * 100
+                st.caption(f"📊 Target medio de analistas: {target_consenso:.2f} ({tc_pct:+.1f}%) — referencia, no objetivo operativo")
         else:
-            st.info("Datos insuficientes para niveles operativos")
+            st.info("Datos insuficientes para el plan de entrada")
 
         st.divider()
 
@@ -4286,7 +4978,7 @@ elif pagina == "📈 Análisis Individual":
             try:
                 today_str    = datetime.now().strftime("%Y-%m-%d")
                 week_ago_str = (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d")
-                news = fh_client.company_news(ticker_in, _from=week_ago_str, to=today_str)
+                news = _news_company_cached(ticker_in, week_ago_str, today_str)
                 if news:
                     for n in news[:10]:
                         fecha_n = datetime.fromtimestamp(n.get("datetime", 0)).strftime("%d-%m %H:%M") if n.get("datetime") else ""
