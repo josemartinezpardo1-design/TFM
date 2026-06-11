@@ -1870,36 +1870,32 @@ def analizar_volumen(df, ventana=60):
 
 
 
-def _plan_estructural(entrada, stop, tp1, tp2, capital, riesgo_pct):
+def _plan_estructural(entrada, stop, tp1, tp2, importe):
     """
-    Position sizing con stop y objetivos ARBITRARIOS (estructurales).
-    A diferencia de _plan_operativo (stop 2xATR fijo), aquí el stop y los TPs
-    vienen de la estructura del gráfico. Cap de concentración: 25% del capital.
-    Devuelve dict con shares, inversión, riesgo y R/R real, o None si inválido.
+    Plan con sizing por IMPORTE directo: shares = importe // entrada.
+    Devuelve P&L exacto en $ y % para stop, TP1 y TP2 — lo que el usuario
+    gana o pierde si el precio toca cada nivel. None si niveles inválidos.
     """
     try:
-        if stop >= entrada or entrada <= 0:
+        if stop >= entrada or entrada <= 0 or importe <= 0:
             return None
-        riesgo_acc = entrada - stop
-        riesgo_eur = capital * riesgo_pct / 100
-        shares = int(riesgo_eur / riesgo_acc)
-        if shares <= 0:
-            return None
+        shares = int(importe // entrada)
         inversion = shares * entrada
-        if inversion > capital * 0.25:
-            shares = int(capital * 0.25 / entrada)
-            inversion = shares * entrada
+        riesgo_acc = entrada - stop
         return {
             "entrada": entrada, "stop": stop,
-            "stop_pct": (stop / entrada - 1) * 100,
             "tp1": tp1, "tp2": tp2,
             "rr1": (tp1 - entrada) / riesgo_acc if riesgo_acc > 0 else None,
             "shares": shares, "inversion": inversion,
-            "riesgo_eur": shares * riesgo_acc,
+            "pnl_stop": shares * (stop - entrada),
+            "pnl_tp1":  shares * (tp1 - entrada),
+            "pnl_tp2":  shares * (tp2 - entrada),
+            "pct_stop": (stop / entrada - 1) * 100,
+            "pct_tp1":  (tp1 / entrada - 1) * 100,
+            "pct_tp2":  (tp2 / entrada - 1) * 100,
         }
     except Exception:
         return None
-
 
 
 def _backtest_entradas(hist, modo="pullback", horizonte=21, max_stop_pct=15.0):
@@ -4123,10 +4119,10 @@ elif pagina == "📈 Análisis Individual":
         ticker_in = st.text_input("Ticker", value="AAPL",
                                    help="Ej: AAPL, NESN.SW, 7203.T")
         st.markdown("**💰 Para el plan de entrada**")
-        ai_capital = st.number_input("Capital ($)", 1000, 10000000, 10000,
-                                      step=1000, key="ai_cap")
-        ai_riesgo  = st.slider("Riesgo por operación (%)", 0.5, 3.0, 1.0, 0.25,
-                                key="ai_rsk")
+        ai_importe = st.number_input("Importe a invertir ($)", 100, 10000000, 1000,
+                                      step=100, key="ai_cap",
+                                      help="Lo que piensas meter en esta operación. "
+                                           "La app te dirá cuánto ganas o pierdes en cada nivel.")
         st.divider()
         go_btn = st.button("🚀 Analizar", type="primary", use_container_width=True)
 
@@ -4408,7 +4404,7 @@ elif pagina == "📈 Análisis Individual":
         else:
             st.markdown("#### 🗺️ Entradas propuestas según la estructura del gráfico")
             st.caption(f"Niveles detectados sobre las últimas 252 sesiones · "
-                       f"Capital: ${ai_capital:,.0f} · Riesgo: {ai_riesgo}% por operación")
+                       f"Importe a invertir: ${ai_importe:,.0f}")
 
             hist_est = hist.tail(252)
             sop_e, res_e = detectar_soportes_resistencias(hist_est)
@@ -4457,7 +4453,7 @@ elif pagina == "📈 Análisis Individual":
             # ── 1. A MERCADO — con stop estructural y TP en resistencia real
             stop_m, razon_sm = _stop_estructural(precio)
             tp1_m, tp2_m, raz_tp_m = _tps_estructurales(precio, stop_m)
-            plan_m = _plan_estructural(precio, stop_m, tp1_m, tp2_m, ai_capital, ai_riesgo)
+            plan_m = _plan_estructural(precio, stop_m, tp1_m, tp2_m, ai_importe)
             if plan_m:
                 propuestas.append((
                     "🟢 A mercado (ahora)", "Mercado", plan_m,
@@ -4472,7 +4468,7 @@ elif pagina == "📈 Análisis Individual":
                     stop_s = max(s1["nivel"] - 0.75 * atr_v, entrada_s * 0.85)
                     tp1_s, tp2_s, raz_tp_s = _tps_estructurales(entrada_s, stop_s)
                     plan_s = _plan_estructural(entrada_s, stop_s, tp1_s, tp2_s,
-                                                ai_capital, ai_riesgo)
+                                                ai_importe)
                     if plan_s:
                         confluencia = ""
                         if abs(ma50_e - s1["nivel"]) < atr_v:
@@ -4491,7 +4487,7 @@ elif pagina == "📈 Análisis Individual":
                     stop_p, razon_sp = _stop_estructural(entrada_p)
                     tp1_p, tp2_p, raz_tp_p = _tps_estructurales(entrada_p, stop_p)
                     plan_p = _plan_estructural(entrada_p, stop_p, tp1_p, tp2_p,
-                                                ai_capital, ai_riesgo)
+                                                ai_importe)
                     if plan_p:
                         dist_p = (ma50_e / precio - 1) * 100
                         propuestas.append((
@@ -4520,7 +4516,7 @@ elif pagina == "📈 Análisis Individual":
                         raz_b = "2R (ruptura a máximos: sin resistencias arriba)"
                     tp2_b = entrada_b + 4 * r_b
                     plan_b = _plan_estructural(entrada_b, stop_b, tp1_b, tp2_b,
-                                                ai_capital, ai_riesgo)
+                                                ai_importe)
                     if plan_b:
                         propuestas.append((
                             f"🟠 Ruptura de {r1['nivel']:.2f} ({dist_r1:+.1f}%)",
@@ -4534,7 +4530,7 @@ elif pagina == "📈 Análisis Individual":
                 stop_b, razon_sb = _stop_estructural(entrada_b)
                 r_b = entrada_b - stop_b
                 plan_b = _plan_estructural(entrada_b, stop_b, entrada_b + 2 * r_b,
-                                            entrada_b + 4 * r_b, ai_capital, ai_riesgo)
+                                            entrada_b + 4 * r_b, ai_importe)
                 if plan_b:
                     propuestas.append((
                         f"🟠 Breakout máx. 60d ({(entrada_b/precio-1)*100:+.1f}%)",
@@ -4549,20 +4545,28 @@ elif pagina == "📈 Análisis Individual":
                 filas_e = []
                 for nombre_e, orden_e, p, _, _ in propuestas:
                     filas_e.append({
-                        "Propuesta":   nombre_e,
-                        "Orden":       orden_e,
-                        "Entrada":     round(p["entrada"], 2),
-                        "Stop":        round(p["stop"], 2),
-                        "Stop %":      round(p["stop_pct"], 1),
-                        "TP1":         round(p["tp1"], 2),
-                        "TP2":         round(p["tp2"], 2),
-                        "R/R a TP1":   round(p["rr1"], 2) if p["rr1"] else None,
-                        "Acciones":    p["shares"],
-                        "Inversión $": round(p["inversion"], 0),
-                        "Riesgo $":    round(p["riesgo_eur"], 0),
+                        "Propuesta":     nombre_e,
+                        "Orden":         orden_e,
+                        "Entrada":       round(p["entrada"], 2),
+                        "Stop":          round(p["stop"], 2),
+                        "TP1":           round(p["tp1"], 2),
+                        "TP2":           round(p["tp2"], 2),
+                        "R/R":           round(p["rr1"], 2) if p["rr1"] else None,
+                        "Acciones":      p["shares"],
+                        "Inversión $":   round(p["inversion"], 0),
+                        "Si toca Stop":  f"−${abs(p['pnl_stop']):,.0f} ({p['pct_stop']:+.1f}%)",
+                        "Si toca TP1":   f"+${p['pnl_tp1']:,.0f} ({p['pct_tp1']:+.1f}%)",
+                        "Si toca TP2":   f"+${p['pnl_tp2']:,.0f} ({p['pct_tp2']:+.1f}%)",
                     })
                 st.dataframe(pd.DataFrame(filas_e), use_container_width=True,
                              hide_index=True)
+
+                # Aviso si el importe no alcanza para 1 acción
+                if any(p["shares"] == 0 for _, _, p, _, _ in propuestas):
+                    precio_min = min(p["entrada"] for _, _, p, _, _ in propuestas)
+                    st.warning(f"⚠️ Con ${ai_importe:,.0f} no alcanzas ni 1 acción "
+                               f"(la entrada más barata es {precio_min:.2f}). Sube el "
+                               f"importe o usa un broker con acciones fraccionadas.")
 
                 for nombre_e, _, _, exp_e, _ in propuestas:
                     st.markdown(f"**{nombre_e}** — {exp_e}")
