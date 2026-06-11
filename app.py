@@ -1870,6 +1870,38 @@ def analizar_volumen(df, ventana=60):
 
 
 
+def _plan_estructural(entrada, stop, tp1, tp2, capital, riesgo_pct):
+    """
+    Position sizing con stop y objetivos ARBITRARIOS (estructurales).
+    A diferencia de _plan_operativo (stop 2xATR fijo), aquí el stop y los TPs
+    vienen de la estructura del gráfico. Cap de concentración: 25% del capital.
+    Devuelve dict con shares, inversión, riesgo y R/R real, o None si inválido.
+    """
+    try:
+        if stop >= entrada or entrada <= 0:
+            return None
+        riesgo_acc = entrada - stop
+        riesgo_eur = capital * riesgo_pct / 100
+        shares = int(riesgo_eur / riesgo_acc)
+        if shares <= 0:
+            return None
+        inversion = shares * entrada
+        if inversion > capital * 0.25:
+            shares = int(capital * 0.25 / entrada)
+            inversion = shares * entrada
+        return {
+            "entrada": entrada, "stop": stop,
+            "stop_pct": (stop / entrada - 1) * 100,
+            "tp1": tp1, "tp2": tp2,
+            "rr1": (tp1 - entrada) / riesgo_acc if riesgo_acc > 0 else None,
+            "shares": shares, "inversion": inversion,
+            "riesgo_eur": shares * riesgo_acc,
+        }
+    except Exception:
+        return None
+
+
+
 def _backtest_entradas(hist, modo="pullback", horizonte=21, max_stop_pct=15.0):
     """
     Mini-backtest de una regla de entrada sobre el histórico del PROPIO ticker.
@@ -4368,75 +4400,192 @@ elif pagina == "📈 Análisis Individual":
     ])
 
     # ─────────────────────────────────────────────────────────────
-    # TAB ENTRADA: escenarios de entrada testados en ESTE valor
+    # TAB ENTRADA: entradas propuestas ESTUDIANDO la estructura del gráfico
     # ─────────────────────────────────────────────────────────────
     with tab_entrada:
         if atr_v is None or atr_v <= 0:
             st.warning("Sin ATR calculable para este ticker — no se puede generar plan de entrada.")
         else:
-            st.markdown("#### 🎯 Tres formas de entrar — elige según tu estilo")
-            st.caption(f"Capital: ${ai_capital:,.0f} · Riesgo por operación: {ai_riesgo}% "
-                       f"(configurable en la barra lateral)")
+            st.markdown("#### 🗺️ Entradas propuestas según la estructura del gráfico")
+            st.caption(f"Niveles detectados sobre las últimas 252 sesiones · "
+                       f"Capital: ${ai_capital:,.0f} · Riesgo: {ai_riesgo}% por operación")
 
+            hist_est = hist.tail(252)
+            sop_e, res_e = detectar_soportes_resistencias(hist_est)
             closes_e = hist["Close"].astype(float)
             highs_e  = hist["High"].astype(float) if "High" in hist.columns else closes_e
             ma50_e   = float(closes_e.tail(50).mean())
             high60_e = float(highs_e.tail(61).iloc[:-1].max()) if len(highs_e) > 61 else None
 
-            escenarios = []
+            def _stop_estructural(entrada):
+                """Tu regla: max(entrada-2ATR, soporte_bajo_entrada-0.5ATR), cap -15%."""
+                stop_atr = entrada - 2 * atr_v
+                sops_below = [s for s in sop_e if s["nivel"] < entrada * 0.995]
+                if sops_below:
+                    s_rel = max(sops_below, key=lambda s: s["nivel"])
+                    stop_sop = s_rel["nivel"] - 0.5 * atr_v
+                    if stop_sop > stop_atr:
+                        stop, razon = stop_sop, f"bajo soporte {s_rel['nivel']:.2f} ({s_rel['toques']}t) − 0.5×ATR"
+                    else:
+                        stop, razon = stop_atr, "2×ATR (el soporte queda más lejos)"
+                else:
+                    stop, razon = stop_atr, "2×ATR (sin soporte estructural debajo)"
+                if stop < entrada * 0.85:
+                    stop, razon = entrada * 0.85, "cap máximo -15%"
+                return stop, razon
 
-            # A) Entrada a mercado
-            plan_mkt = _plan_operativo(precio, atr_v, ai_capital, ai_riesgo)
-            if plan_mkt:
-                escenarios.append(("🟢 A mercado (ahora)", plan_mkt,
-                    "Compras hoy al precio actual. Sin esperar — pagas la inmediatez "
-                    "con un stop más lejano del soporte natural."))
+            def _tps_estructurales(entrada, stop):
+                """TPs en resistencias reales (si distan ≥1R); si no, múltiplos de R."""
+                r = entrada - stop
+                res_above = sorted([x for x in res_e if x["nivel"] > entrada * 1.005],
+                                   key=lambda x: x["nivel"])
+                tps, razones = [], []
+                for x in res_above:
+                    if x["nivel"] >= entrada + r:
+                        tps.append(x["nivel"])
+                        razones.append(f"resistencia {x['nivel']:.2f} ({x['toques']}t)")
+                    if len(tps) == 2:
+                        break
+                while len(tps) < 2:
+                    mult = 2 if not tps else 4
+                    tps.append(entrada + mult * r)
+                    razones.append(f"{mult}R (sin resistencia a esa altura)")
+                return tps[0], tps[1], razones
 
-            # B) Pullback a MA50 (orden limitada) — solo si la MA50 está por debajo
+            propuestas = []  # (nombre, tipo_orden, plan, explicacion, toques_nivel)
+
+            # ── 1. A MERCADO — con stop estructural y TP en resistencia real
+            stop_m, razon_sm = _stop_estructural(precio)
+            tp1_m, tp2_m, raz_tp_m = _tps_estructurales(precio, stop_m)
+            plan_m = _plan_estructural(precio, stop_m, tp1_m, tp2_m, ai_capital, ai_riesgo)
+            if plan_m:
+                propuestas.append((
+                    "🟢 A mercado (ahora)", "Mercado", plan_m,
+                    f"Stop {razon_sm} · TP1 en {raz_tp_m[0]}", 0))
+
+            # ── 2. REBOTE EN SOPORTE — orden limitada en el soporte más cercano
+            if sop_e:
+                s1 = sop_e[0]
+                dist_s1 = (s1["nivel"] / precio - 1) * 100
+                if -12 <= dist_s1 < -0.5:
+                    entrada_s = s1["nivel"] + 0.1 * atr_v  # ligera anticipación
+                    stop_s = max(s1["nivel"] - 0.75 * atr_v, entrada_s * 0.85)
+                    tp1_s, tp2_s, raz_tp_s = _tps_estructurales(entrada_s, stop_s)
+                    plan_s = _plan_estructural(entrada_s, stop_s, tp1_s, tp2_s,
+                                                ai_capital, ai_riesgo)
+                    if plan_s:
+                        confluencia = ""
+                        if abs(ma50_e - s1["nivel"]) < atr_v:
+                            confluencia = " · ⭐ CONFLUENCIA con MA50 (nivel reforzado)"
+                        propuestas.append((
+                            f"🔵 Rebote en soporte {s1['nivel']:.2f} ({dist_s1:+.1f}%)",
+                            "Limitada", plan_s,
+                            f"Soporte tocado {s1['toques']} veces · stop bajo el nivel · "
+                            f"TP1 en {raz_tp_s[0]}{confluencia}", s1["toques"]))
+
+            # ── 3. PULLBACK A MA50 — solo si no coincide con el soporte ya propuesto
             if ma50_e < precio * 0.995:
-                plan_pb = _plan_operativo(precio, atr_v, ai_capital, ai_riesgo,
-                                           entrada=ma50_e)
-                if plan_pb:
-                    dist_pb = (ma50_e / precio - 1) * 100
-                    escenarios.append((f"🔵 Pullback a MA50 ({dist_pb:+.1f}%)", plan_pb,
-                        f"Orden limitada en {ma50_e:.2f}: esperas el retroceso a la media de "
-                        f"50 sesiones. Mejor precio y stop más cercano — a cambio, puede no llenarse."))
+                coincide = sop_e and abs(ma50_e - sop_e[0]["nivel"]) < atr_v
+                if not coincide:
+                    entrada_p = ma50_e
+                    stop_p, razon_sp = _stop_estructural(entrada_p)
+                    tp1_p, tp2_p, raz_tp_p = _tps_estructurales(entrada_p, stop_p)
+                    plan_p = _plan_estructural(entrada_p, stop_p, tp1_p, tp2_p,
+                                                ai_capital, ai_riesgo)
+                    if plan_p:
+                        dist_p = (ma50_e / precio - 1) * 100
+                        propuestas.append((
+                            f"🟣 Pullback a MA50 ({dist_p:+.1f}%)", "Limitada", plan_p,
+                            f"Media de 50 sesiones como zona de demanda · stop {razon_sp} · "
+                            f"TP1 en {raz_tp_p[0]}", 0))
 
-            # C) Breakout (orden stop-buy) — solo si el máximo de 60d está por encima
-            if high60_e and high60_e > precio * 1.005:
-                entrada_bo = high60_e + 0.25 * atr_v
-                plan_bo = _plan_operativo(precio, atr_v, ai_capital, ai_riesgo,
-                                           entrada=entrada_bo)
-                if plan_bo:
-                    dist_bo = (entrada_bo / precio - 1) * 100
-                    escenarios.append((f"🟠 Breakout 60d ({dist_bo:+.1f}%)", plan_bo,
-                        f"Orden stop-buy en {entrada_bo:.2f} (máximo de 60 días + 0.25×ATR): "
-                        f"solo entras si el valor demuestra fuerza rompiendo. Pagas más caro "
-                        f"a cambio de confirmación."))
+            # ── 4. RUPTURA DE RESISTENCIA — stop-buy sobre R1
+            if res_e:
+                r1 = res_e[0]
+                dist_r1 = (r1["nivel"] / precio - 1) * 100
+                if 0.5 < dist_r1 <= 12:
+                    entrada_b = r1["nivel"] + 0.25 * atr_v
+                    # Tras la ruptura, R1 se convierte en soporte → stop bajo R1
+                    stop_b = max(r1["nivel"] - 0.75 * atr_v, entrada_b * 0.85)
+                    # TPs: resistencias por ENCIMA de R1, o múltiplos
+                    r_b = entrada_b - stop_b
+                    res_above_b = sorted([x for x in res_e
+                                          if x["nivel"] > entrada_b * 1.005],
+                                         key=lambda x: x["nivel"])
+                    if res_above_b and res_above_b[0]["nivel"] >= entrada_b + r_b:
+                        tp1_b = res_above_b[0]["nivel"]
+                        raz_b = f"siguiente resistencia {tp1_b:.2f} ({res_above_b[0]['toques']}t)"
+                    else:
+                        tp1_b = entrada_b + 2 * r_b
+                        raz_b = "2R (ruptura a máximos: sin resistencias arriba)"
+                    tp2_b = entrada_b + 4 * r_b
+                    plan_b = _plan_estructural(entrada_b, stop_b, tp1_b, tp2_b,
+                                                ai_capital, ai_riesgo)
+                    if plan_b:
+                        propuestas.append((
+                            f"🟠 Ruptura de {r1['nivel']:.2f} ({dist_r1:+.1f}%)",
+                            "Stop-buy", plan_b,
+                            f"Resistencia tocada {r1['toques']} veces — si rompe, se "
+                            f"convierte en soporte (stop bajo ella) · TP1 en {raz_b} · "
+                            f"⚠️ Exigir volumen ≥1.5× en la ruptura", r1["toques"]))
+            elif high60_e and high60_e > precio * 1.005:
+                # Sin resistencias detectadas pero hay máximo 60d por encima
+                entrada_b = high60_e + 0.25 * atr_v
+                stop_b, razon_sb = _stop_estructural(entrada_b)
+                r_b = entrada_b - stop_b
+                plan_b = _plan_estructural(entrada_b, stop_b, entrada_b + 2 * r_b,
+                                            entrada_b + 4 * r_b, ai_capital, ai_riesgo)
+                if plan_b:
+                    propuestas.append((
+                        f"🟠 Breakout máx. 60d ({(entrada_b/precio-1)*100:+.1f}%)",
+                        "Stop-buy", plan_b,
+                        f"Sin resistencias estructurales — ruptura del máximo de 60 días "
+                        f"con confirmación · stop {razon_sb}", 0))
 
-            if not escenarios:
-                st.info("El precio actual no permite escenarios alternativos limpios "
-                        "(ej: ya está en máximos y sobre la MA50) — solo entrada a mercado.")
-
-            # Tabla comparativa
-            filas_e = []
-            for nombre_e, p, desc_e in escenarios:
-                filas_e.append({
-                    "Escenario":   nombre_e,
-                    "Entrada":     round(p["entrada"], 2),
-                    "Stop":        round(p["stop"], 2),
-                    "Stop %":      round(p["stop_pct"], 1),
-                    "TP1 (2:1)":   round(p["tp1"], 2),
-                    "TP2 (4:1)":   round(p["tp2"], 2),
-                    "Acciones":    p["shares"],
-                    "Inversión $": round(p["inversion"], 0),
-                    "Riesgo $":    round(p["riesgo_eur"], 0),
-                })
-            if filas_e:
+            if not propuestas:
+                st.info("No se pudieron generar propuestas (estructura insuficiente).")
+            else:
+                # Tabla comparativa
+                filas_e = []
+                for nombre_e, orden_e, p, _, _ in propuestas:
+                    filas_e.append({
+                        "Propuesta":   nombre_e,
+                        "Orden":       orden_e,
+                        "Entrada":     round(p["entrada"], 2),
+                        "Stop":        round(p["stop"], 2),
+                        "Stop %":      round(p["stop_pct"], 1),
+                        "TP1":         round(p["tp1"], 2),
+                        "TP2":         round(p["tp2"], 2),
+                        "R/R a TP1":   round(p["rr1"], 2) if p["rr1"] else None,
+                        "Acciones":    p["shares"],
+                        "Inversión $": round(p["inversion"], 0),
+                        "Riesgo $":    round(p["riesgo_eur"], 0),
+                    })
                 st.dataframe(pd.DataFrame(filas_e), use_container_width=True,
                              hide_index=True)
-                for nombre_e, _, desc_e in escenarios:
-                    st.markdown(f"**{nombre_e}** — {desc_e}")
+
+                for nombre_e, _, _, exp_e, _ in propuestas:
+                    st.markdown(f"**{nombre_e}** — {exp_e}")
+
+                # ── Veredicto: la mejor entrada según R/R real y calidad del nivel
+                validas = [(n, o, p, e, t) for n, o, p, e, t in propuestas
+                           if p["rr1"] and p["rr1"] >= 1.3]
+                st.divider()
+                if validas:
+                    mejor = max(validas, key=lambda x: (x[2]["rr1"], x[4]))
+                    st.success(
+                        f"🏆 **Mejor entrada según la estructura: {mejor[0]}** — "
+                        f"R/R {mejor[2]['rr1']:.1f}:1 hasta el primer objetivo. {mejor[3]}")
+                    if mejor[2]["rr1"] < 2:
+                        st.caption("ℹ️ R/R entre 1.3 y 2 es aceptable pero no excelente — "
+                                   "considera esperar mejor precio.")
+                else:
+                    mejor_rr = max((p["rr1"] or 0) for _, _, p, _, _ in propuestas)
+                    st.error(
+                        f"⛔ **Ninguna entrada tiene R/R ≥ 1.3 ahora mismo** "
+                        f"(mejor: {mejor_rr:.1f}:1). El precio está mal posicionado "
+                        f"respecto a su estructura — la decisión de más calidad es **esperar**: "
+                        f"o un retroceso al soporte, o una ruptura confirmada de la resistencia.")
 
             st.divider()
 
@@ -4448,7 +4597,7 @@ elif pagina == "📈 Análisis Individual":
 
             col_bt1, col_bt2 = st.columns(2)
             for col_bt, modo_bt, label_bt in [
-                (col_bt1, "pullback", "🔵 Pullback a MA50"),
+                (col_bt1, "pullback", "🟣 Pullback a MA50"),
                 (col_bt2, "breakout", "🟠 Breakout 60d"),
             ]:
                 with col_bt:
@@ -4465,13 +4614,7 @@ elif pagina == "📈 Análisis Individual":
                         c3.metric("Ret. medio", f"{bt['ret_medio']:+.1f}%")
                         st.caption(f"Mejor: {bt['mejor']:+.1f}% · Peor: {bt['peor']:+.1f}%")
                         if bt["n"] < 5:
-                            st.caption("⚠️ Menos de 5 señales — tómalo como anécdota, no como estadística")
-
-            st.info("💡 **Cómo usar esto:** si el backtest de pullback en este valor tiene "
-                    "buen win rate y el precio está extendido sobre la MA50, la orden "
-                    "limitada suele ser la entrada de más calidad. Si el valor nunca da "
-                    "señales de pullback (tendencias muy fuertes), el breakout o la entrada "
-                    "a mercado con tamaño reducido son las alternativas.")
+                            st.caption("⚠️ Menos de 5 señales — anécdota, no estadística")
 
     # ─────────────────────────────────────────────────────────────
     # TAB 1: RESUMEN (decision-ready)
