@@ -1719,6 +1719,26 @@ def _outlook_watchlist_bulk(tickers_tuple):
 
 
 @st.cache_data(ttl=300, show_spinner=False)
+def _leer_senales_activas():
+    """
+    Lee la pestaña 'senales_activas' (estado vivo del escáner v3).
+    Devuelve DataFrame, vacío si no hay señales, o None si no configurado.
+    """
+    if not GSPREAD_AVAILABLE:
+        return None
+    try:
+        creds = Credentials.from_service_account_info(
+            dict(st.secrets["gcp_service_account"]),
+            scopes=["https://www.googleapis.com/auth/spreadsheets"])
+        client = gspread.authorize(creds)
+        ws = client.open_by_key(WATCHLIST_SHEET_ID).worksheet("senales_activas")
+        vals = ws.get_all_records()
+        return pd.DataFrame(vals) if vals else pd.DataFrame()
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=300, show_spinner=False)
 def _leer_senales_escaner():
     """
     Lee la pestaña 'senales' del Sheet (escrita por scanner.py vía GitHub Actions).
@@ -2326,36 +2346,57 @@ if pagina == "🌅 Outlook":
     # SEÑALES DEL ESCÁNER AUTOMÁTICO (GitHub Actions → Sheets)
     # ═══════════════════════════════════════════════════════════════
     st.markdown("### 📡 Señales del escáner automático")
-    df_sen = _leer_senales_escaner()
-    if df_sen is None:
+    df_act = _leer_senales_activas()
+    df_log = _leer_senales_escaner()
+
+    if df_act is None and df_log is None:
         st.caption("⚙️ Escáner aún no configurado — cuando actives el workflow de "
-                   "GitHub Actions, las señales aparecerán aquí cada 30 min en sesión US.")
-    elif df_sen.empty:
-        st.caption("📭 Sin señales registradas todavía. El escáner escribe aquí "
-                   "cada 30 minutos durante la sesión americana.")
+                   "GitHub Actions, las señales aparecerán aquí.")
     else:
+        # Resumen del último escaneo (fila de control _run del log)
         try:
-            ultimo_ts = df_sen["timestamp"].astype(str).max()
-            dia_ult   = ultimo_ts[:10]
-            df_ult    = df_sen[df_sen["timestamp"].astype(str) == ultimo_ts]
-            df_hoy    = df_sen[df_sen["timestamp"].astype(str).str.startswith(dia_ult)]
+            if df_log is not None and not df_log.empty and "estrategia" in df_log.columns:
+                runs = df_log[df_log["estrategia"].astype(str) == "_run"]
+                if not runs.empty:
+                    ult = runs.iloc[-1]
+                    rol_txt = {"apertura": "☀️ Apertura", "mediodia": "🕐 Mediodía",
+                               "cierre": "🌙 Cierre"}.get(str(ult.get("ticker", "")),
+                                                           str(ult.get("ticker", "")))
+                    st.caption(f"Último escaneo: **{rol_txt}** · {ult.get('timestamp','')} "
+                               f"(hora NY) · {ult.get('detalle','')}")
+        except Exception:
+            pass
 
-            col_se1, col_se2, col_se3 = st.columns(3)
-            col_se1.metric("Último escaneo (hora NY)", ultimo_ts[11:] or ultimo_ts)
-            col_se2.metric("Señales en el último escaneo", len(df_ult))
-            col_se3.metric(f"Señales del día {dia_ult}", len(df_hoy))
-
-            if not df_ult.empty:
-                cols_show = [c for c in ["estrategia", "ticker", "precio", "entrada",
-                                          "stop", "tp1", "tp2", "detalle"]
-                             if c in df_ult.columns]
-                st.dataframe(df_ult[cols_show], use_container_width=True,
+        if df_act is None or df_act.empty:
+            st.info("📭 Sin entradas claras activas ahora mismo (R/R ≥ 2 contra "
+                    "estructura real). Que no haya señales también es información: "
+                    "el escáner prefiere silencio a ruido.")
+        else:
+            try:
+                df_show = df_act.copy()
+                if "rr" in df_show.columns:
+                    df_show = df_show.sort_values("rr", ascending=False)
+                cols_orden = [c for c in ["estrategia", "ticker", "fecha_alta",
+                                           "entrada", "stop", "tp1", "rr", "detalle"]
+                              if c in df_show.columns]
+                st.dataframe(df_show[cols_orden], use_container_width=True,
                              hide_index=True)
-            if len(df_hoy) > len(df_ult):
-                with st.expander(f"📜 Todas las señales de {dia_ult} ({len(df_hoy)})"):
-                    st.dataframe(df_hoy, use_container_width=True, hide_index=True)
-        except Exception as e:
-            st.warning(f"Señales ilegibles: {e}")
+                st.caption(f"🎯 {len(df_show)} señales vivas con entrada clara, "
+                           f"ordenadas por R/R estructural. 'fecha_alta' = día en "
+                           f"que apareció la señal (las repetidas no se duplican).")
+            except Exception as e:
+                st.warning(f"Señales ilegibles: {e}")
+
+        # Log de altas recientes (excluye filas de control)
+        try:
+            if df_log is not None and not df_log.empty and "estrategia" in df_log.columns:
+                df_altas = df_log[df_log["estrategia"].astype(str) != "_run"]
+                if not df_altas.empty:
+                    with st.expander(f"📜 Histórico de altas ({len(df_altas)})"):
+                        st.dataframe(df_altas.tail(40).iloc[::-1],
+                                     use_container_width=True, hide_index=True)
+        except Exception:
+            pass
 
     st.divider()
 
