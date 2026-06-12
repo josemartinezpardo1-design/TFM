@@ -2,19 +2,21 @@ name: Market Scanner
 
 on:
   schedule:
-    # Cada 30 min, 13:00-21:00 UTC, L-V (cubre la sesión US 9:30-16:00 ET
-    # tanto en horario de verano como de invierno; el script comprueba
-    # internamente si el mercado está abierto y sale si no lo está)
-    - cron: "*/30 13-21 * * 1-5"
-  workflow_dispatch: {}   # permite lanzarlo a mano desde la pestaña Actions
+    # 3 escaneos con rol (apertura / mediodía / cierre). Los 5 ticks cubren
+    # horario de verano e invierno de NY; el script determina el rol según
+    # la hora de NY y sale limpio si el rol ya se ejecutó o está fuera de franja.
+    - cron: "45 13 * * 1-5"   # verano: 9:45 NY apertura | invierno: pre-mercado (skip)
+    - cron: "45 14 * * 1-5"   # verano: 10:45 (skip, ya hecho) | invierno: 9:45 apertura
+    - cron: "0 17 * * 1-5"    # verano: 13:00 mediodía | invierno: 12:00 mediodía
+    - cron: "10 20 * * 1-5"   # verano: 16:10 cierre | invierno: 15:10 (skip)
+    - cron: "10 21 * * 1-5"   # verano: 17:10 (skip) | invierno: 16:10 cierre
+  workflow_dispatch: {}
 
 jobs:
   scan:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      # Las actions de GitHub migran de Node 20 a Node 24 el 16-06-2026;
-      # esto adopta Node 24 ya y elimina el warning de deprecación
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     steps:
       - name: Checkout
@@ -33,6 +35,5 @@ jobs:
           GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        # Si lo lanzas a mano (workflow_dispatch) usa --force para poder
-        # probarlo aunque el mercado esté cerrado
+        # El lanzamiento manual usa --force (simula rol apertura)
         run: python scanner.py ${{ github.event_name == 'workflow_dispatch' && '--force' || '' }}
