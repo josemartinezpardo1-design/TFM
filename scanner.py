@@ -48,11 +48,12 @@ def mercado_abierto():
     return (9 * 60 + 30) <= minutos <= (16 * 60)
 
 
-def es_primer_run_del_dia():
-    """True en la primera media hora de sesión (para Momentum diario)."""
-    ahora = datetime.now(ZoneInfo("America/New_York"))
-    minutos = ahora.hour * 60 + ahora.minute
-    return (9 * 60 + 30) <= minutos < (10 * 60 + 5)
+def momentum_ya_generado_hoy(vistos_hoy):
+    """True si el Sheet ya tiene señales Momentum con fecha de hoy.
+    Sustituye a la antigua ventana horaria 9:30-10:05, que fallaba si el
+    cron de GitHub llegaba con retraso: ahora el momentum se genera en el
+    PRIMER run efectivo del día, sea a la hora que sea."""
+    return any(estrategia == "Momentum" for estrategia, _ in vistos_hoy)
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -281,10 +282,24 @@ def señales_ya_notificadas_hoy(ws, hoy):
 # ──────────────────────────────────────────────────────────────────
 # 6. Telegram (opcional)
 # ──────────────────────────────────────────────────────────────────
-def notificar_telegram(señales_nuevas):
+def notificar_telegram(señales_nuevas, latido=False):
+    """Envía señales nuevas. Si latido=True (primer run del día), envía
+    mensaje aunque no haya señales — confirma que el escáner está vivo."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     chat = os.environ.get("TELEGRAM_CHAT_ID", "")
-    if not token or not chat or not señales_nuevas:
+    if not token or not chat:
+        return
+    if not señales_nuevas:
+        if latido:
+            try:
+                requests.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={"chat_id": chat,
+                          "text": "📡 Escáner activo — primer escaneo del día "
+                                  "completado, sin señales nuevas por ahora."},
+                    timeout=15)
+            except Exception:
+                pass
         return
     lineas = ["📡 Señales del escáner:"]
     for estrategia, t, precio, e, s, t1, _, detalle in señales_nuevas[:10]:
@@ -321,22 +336,24 @@ def main():
         print("⚠️ Muy pocos datos (¿rate limit?). Abortando sin escribir.")
         sys.exit(1)
 
-    incluir_momentum = es_primer_run_del_dia() or forzar
-    print(f"3/4 Escaneando (momentum diario: {incluir_momentum})...", flush=True)
-    señales = escanear(datos, incluir_momentum)
-    print(f"  {len(señales)} señales", flush=True)
-
-    print("4/4 Guardando en Google Sheets...", flush=True)
     ws = conectar_sheet()
     ahora_ny = datetime.now(ZoneInfo("America/New_York"))
     ts = ahora_ny.strftime("%Y-%m-%d %H:%M")
     hoy = ahora_ny.strftime("%Y-%m-%d")
-
     vistos_hoy = señales_ya_notificadas_hoy(ws, hoy)
+
+    es_primer_run = not any(True for _ in vistos_hoy)  # nada guardado hoy aún
+    incluir_momentum = (not momentum_ya_generado_hoy(vistos_hoy)) or forzar
+    print(f"3/4 Escaneando (momentum diario: {incluir_momentum}, "
+          f"primer run del día: {es_primer_run})...", flush=True)
+    señales = escanear(datos, incluir_momentum)
+    print(f"  {len(señales)} señales", flush=True)
+
+    print("4/4 Guardando en Google Sheets...", flush=True)
     nuevas = [s for s in señales if (s[0], s[1]) not in vistos_hoy]
 
     guardar_señales(ws, señales, ts)
-    notificar_telegram(nuevas)
+    notificar_telegram(nuevas, latido=es_primer_run)
     print(f"✅ Guardadas {len(señales)} señales ({len(nuevas)} nuevas hoy)")
 
 
