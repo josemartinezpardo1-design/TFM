@@ -4514,8 +4514,17 @@ elif pagina == "📈 Análisis Individual":
                     else:
                         st.error(f"No se pudo obtener precio de {t_clean_btn}")
 
+    # ── Persistencia del análisis ──────────────────────────────────
+    # Los widgets internos (checkbox 📌, selector de periodo, etc.) provocan
+    # un rerun en el que go_btn vuelve a False. Sin persistencia, cualquier
+    # interacción expulsaba a la pantalla de bienvenida y el código posterior
+    # (p.ej. el registro de trades) nunca se ejecutaba.
+    if go_btn and ticker_in:
+        st.session_state["ai_ticker_activo"] = ticker_in.upper().strip()
+    ticker_activo = st.session_state.get("ai_ticker_activo", "")
+
     # ── Pantalla de bienvenida ─────────────────────────────────────
-    if not go_btn or not ticker_in:
+    if not ticker_activo:
         st.header("📈 Análisis Individual de Acciones")
         st.markdown(
             "**Análisis 360°** — técnico + fundamental + macro + peers para tomar "
@@ -4543,7 +4552,7 @@ elif pagina == "📈 Análisis Individual":
     # ═══════════════════════════════════════════════════════════════
     # ANÁLISIS COMPLETO
     # ═══════════════════════════════════════════════════════════════
-    ticker_in = ticker_in.upper().strip()
+    ticker_in = ticker_activo
 
     # CSS responsive móvil
     st.markdown("""
