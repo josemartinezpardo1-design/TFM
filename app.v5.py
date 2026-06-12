@@ -1202,6 +1202,185 @@ def watchlist_load():
     except Exception:
         return pd.DataFrame(columns=WATCHLIST_COLS)
 
+
+# ╔═══════════════════════════════════════════════════════════════╗
+# ║  DIARIO DE TRADES (paper trading de las entradas propuestas)   ║
+# ╚═══════════════════════════════════════════════════════════════╝
+TRADES_COLS = ["fecha_registro", "ticker", "propuesta", "orden", "entrada",
+               "stop", "tp1", "tp2", "rr", "acciones", "importe",
+               "estado", "resultado_pct", "resultado_usd", "fecha_cierre"]
+
+
+def get_trades_ws():
+    """Worksheet 'trades' del mismo Sheet. La crea si no existe."""
+    if not GSPREAD_AVAILABLE:
+        return None
+    try:
+        creds = Credentials.from_service_account_info(
+            dict(st.secrets["gcp_service_account"]),
+            scopes=["https://www.googleapis.com/auth/spreadsheets"])
+        client = gspread.authorize(creds)
+        sh = client.open_by_key(WATCHLIST_SHEET_ID)
+        try:
+            return sh.worksheet("trades")
+        except gspread.exceptions.WorksheetNotFound:
+            ws = sh.add_worksheet(title="trades", rows=500, cols=18)
+            ws.append_row(TRADES_COLS, value_input_option="RAW")
+            return ws
+    except Exception as e:
+        st.session_state["_trades_last_error"] = str(e)
+        return None
+
+
+def trades_load():
+    ws = get_trades_ws()
+    if ws is None:
+        return pd.DataFrame(columns=TRADES_COLS)
+    try:
+        data = ws.get_all_records()
+        if not data:
+            return pd.DataFrame(columns=TRADES_COLS)
+        df = pd.DataFrame(data)
+        for c in TRADES_COLS:
+            if c not in df.columns:
+                df[c] = ""
+        return df[TRADES_COLS]
+    except Exception:
+        return pd.DataFrame(columns=TRADES_COLS)
+
+
+def trades_add(ticker, propuesta, orden, plan, importe):
+    """Registra un trade desde la tab Entrada. Dedupe: mismo ticker+propuesta
+    con estado vivo (pendiente/abierto) no se duplica. Siempre RAW."""
+    ws = get_trades_ws()
+    if ws is None:
+        return False, "Sin conexión a Sheets"
+    try:
+        df = trades_load()
+        if not df.empty:
+            vivos = df[(df["ticker"].astype(str) == ticker)
+                       & (df["propuesta"].astype(str) == propuesta)
+                       & (df["estado"].astype(str).isin(["pendiente", "abierto"]))]
+            if len(vivos) > 0:
+                return False, "Ya registrado y sigue vivo"
+        estado = "abierto" if orden == "Mercado" else "pendiente"
+        fecha = datetime.now().strftime("%Y-%m-%d")
+        ws.append_row(
+            [fecha, ticker, propuesta, orden,
+             round(float(plan["entrada"]), 2), round(float(plan["stop"]), 2),
+             round(float(plan["tp1"]), 2), round(float(plan["tp2"]), 2),
+             round(float(plan["rr"]), 2) if plan.get("rr") else "",
+             int(plan["shares"]), round(float(plan["inversion"]), 2),
+             estado, "", "", ""],
+            value_input_option="RAW")
+        return True, estado
+    except Exception as e:
+        return False, str(e)[:80]
+
+
+def trades_evaluar(df_trades):
+    """
+    Evalúa trades vivos contra el histórico real desde su registro:
+    - 'pendiente' (Limitada): se ejecuta si el Low tocó la entrada
+    - 'pendiente' (Stop-buy): se ejecuta si el High tocó la entrada
+    - 'abierto': stop si Low tocó stop; tp2/tp1 si High los tocó
+      (mismo día stop y tp → criterio conservador: cuenta el stop)
+    Escribe las transiciones en Sheets (RAW) y devuelve (df actualizado, n_cambios).
+    Aproximación de paper trading con velas diarias: los gaps reales
+    pueden diferir.
+    """
+    vivos = df_trades[df_trades["estado"].astype(str).isin(["pendiente", "abierto"])]
+    if vivos.empty:
+        return df_trades, 0
+    tickers = sorted(set(vivos["ticker"].astype(str)))
+    try:
+        if len(tickers) == 1:
+            raw = yf.download(tickers[0], period="6mo", auto_adjust=True, progress=False)
+            hists = {tickers[0]: raw} if raw is not None and not raw.empty else {}
+        else:
+            raw = yf.download(tickers, period="6mo", auto_adjust=True, progress=False)
+            hists = {}
+            if raw is not None and not raw.empty and isinstance(raw.columns, pd.MultiIndex):
+                for t in tickers:
+                    try:
+                        df_t = pd.DataFrame({
+                            "High": raw["High"][t], "Low": raw["Low"][t],
+                            "Close": raw["Close"][t]}).dropna()
+                        if not df_t.empty:
+                            hists[t] = df_t
+                    except Exception:
+                        continue
+    except Exception:
+        return df_trades, 0
+
+    ws = get_trades_ws()
+    cambios = 0
+    for idx, row in vivos.iterrows():
+        t = str(row["ticker"])
+        if t not in hists:
+            continue
+        h = hists[t]
+        try:
+            f_reg = pd.to_datetime(str(row["fecha_registro"]))
+            h_post = h[h.index.date > f_reg.date()]  # desde el día siguiente
+            if h_post.empty:
+                continue
+            entrada = float(row["entrada"]); stop = float(row["stop"])
+            tp1 = float(row["tp1"]); tp2 = float(row["tp2"])
+            acciones = float(row["acciones"]) if row["acciones"] else 0
+            orden = str(row["orden"]); estado = str(row["estado"])
+            nuevo_estado, salida, f_cierre = None, None, None
+
+            for fecha_d, vela in h_post.iterrows():
+                lo, hi = float(vela["Low"]), float(vela["High"])
+                if estado == "pendiente":
+                    if (orden == "Limitada" and lo <= entrada) or \
+                       (orden == "Stop-buy" and hi >= entrada):
+                        estado = "abierto"
+                        nuevo_estado = "abierto"
+                        # mismo día puede tocar stop (conservador)
+                        if lo <= stop:
+                            nuevo_estado, salida = "stop", stop
+                            f_cierre = fecha_d
+                            break
+                        continue
+                elif estado == "abierto":
+                    if lo <= stop:
+                        nuevo_estado, salida = "stop", stop
+                        f_cierre = fecha_d
+                        break
+                    if hi >= tp2:
+                        nuevo_estado, salida = "tp2", tp2
+                        f_cierre = fecha_d
+                        break
+                    if hi >= tp1:
+                        nuevo_estado, salida = "tp1", tp1
+                        f_cierre = fecha_d
+                        break
+
+            if nuevo_estado and ws is not None:
+                fila_sheet = idx + 2  # header + 1-indexado
+                # Columnas L:O = estado, resultado_pct, resultado_usd, fecha_cierre
+                # CRÍTICO: un único update con RAW — update_cell usa USER_ENTERED
+                # y reintroduciría el bug de locale español con los decimales
+                if salida is not None:
+                    res_pct = round((salida / entrada - 1) * 100, 2)
+                    res_usd = round(acciones * (salida - entrada), 2)
+                    f_cierre_str = str(f_cierre.date()) if f_cierre is not None else ""
+                    valores_fila = [[nuevo_estado, res_pct, res_usd, f_cierre_str]]
+                else:
+                    valores_fila = [[nuevo_estado, "", "", ""]]
+                ws.update(range_name=f"L{fila_sheet}:O{fila_sheet}",
+                          values=valores_fila, value_input_option="RAW")
+                cambios += 1
+        except Exception:
+            continue
+
+    if cambios:
+        df_trades = trades_load()
+    return df_trades, cambios
+
+
 def watchlist_add(ticker, precio_inicial, nota=""):
     """
     Añade un ticker a la watchlist.
@@ -4209,6 +4388,97 @@ elif pagina == "⭐ Watchlist":
                     st.session_state.pop("wl_data", None)
                     st.rerun()
 
+    # ═══════════════════════════════════════════════════════════════
+    # 📒 DIARIO DE TRADES — seguimiento de las entradas registradas
+    # ═══════════════════════════════════════════════════════════════
+    st.divider()
+    st.markdown("## 📒 Diario de trades")
+    st.caption("Las entradas que registras desde **Análisis Individual → 🎯 Entrada** "
+               "se evalúan aquí automáticamente contra el precio real: si tocaron "
+               "su entrada, su stop o sus objetivos. Paper trading con velas "
+               "diarias — los fills reales pueden diferir en gaps.")
+
+    df_tr = trades_load()
+    if df_tr.empty:
+        st.info("📭 Aún no has registrado ningún trade. Analiza un valor, ve a la "
+                "pestaña 🎯 Entrada y marca el checkbox 📌 de la propuesta que "
+                "quieras seguir.")
+    else:
+        # Evaluación automática de vivos
+        n_vivos = int(df_tr["estado"].astype(str).isin(["pendiente", "abierto"]).sum())
+        if n_vivos > 0:
+            with st.spinner(f"Evaluando {n_vivos} trades vivos contra el mercado..."):
+                df_tr, n_cambios = trades_evaluar(df_tr)
+            if n_cambios:
+                st.success(f"🔄 {n_cambios} trades actualizados (ejecuciones, "
+                           f"stops o TPs tocados)")
+
+        # ── Métricas globales ────────────────────────────────────
+        cerrados = df_tr[df_tr["estado"].astype(str).isin(["stop", "tp1", "tp2"])]
+        abiertos = df_tr[df_tr["estado"].astype(str) == "abierto"]
+        pendientes = df_tr[df_tr["estado"].astype(str) == "pendiente"]
+
+        c_t1, c_t2, c_t3, c_t4, c_t5 = st.columns(5)
+        c_t1.metric("Total registrados", len(df_tr))
+        c_t2.metric("Abiertos", len(abiertos))
+        c_t3.metric("Pendientes de ejecutar", len(pendientes))
+        if len(cerrados) > 0:
+            wins = int(cerrados["estado"].astype(str).isin(["tp1", "tp2"]).sum())
+            win_rate = wins / len(cerrados) * 100
+            try:
+                pnl_total = pd.to_numeric(cerrados["resultado_usd"],
+                                          errors="coerce").sum()
+            except Exception:
+                pnl_total = 0
+            c_t4.metric("Win rate (cerrados)", f"{win_rate:.0f}%",
+                        help="TP1/TP2 cuentan como acierto, stop como fallo")
+            c_t5.metric("P&L cerrado", f"${pnl_total:+,.0f}")
+        else:
+            c_t4.metric("Win rate", "—", help="Sin trades cerrados todavía")
+            c_t5.metric("P&L cerrado", "—")
+
+        # ── Tabla con estado coloreado ───────────────────────────
+        EMOJI_ESTADO = {"pendiente": "⏳ pendiente", "abierto": "📈 abierto",
+                        "stop": "🔴 stop", "tp1": "🟢 TP1", "tp2": "🟢🟢 TP2"}
+        df_show_tr = df_tr.copy()
+        df_show_tr["estado"] = df_show_tr["estado"].astype(str).map(
+            lambda x: EMOJI_ESTADO.get(x, x))
+        st.dataframe(df_show_tr.iloc[::-1], use_container_width=True,
+                     hide_index=True)
+
+        # ── Rendimiento por tipo de propuesta (el refinamiento) ──
+        if len(cerrados) >= 3:
+            st.markdown("#### 🔬 ¿Qué tipo de entrada te funciona mejor?")
+            try:
+                df_an = cerrados.copy()
+                # Normalizar nombre de propuesta (quitar emoji y nivel concreto)
+                def _tipo(p):
+                    p = str(p)
+                    if "soporte" in p: return "Rebote en soporte"
+                    if "MA50" in p: return "Pullback MA50"
+                    if "Breakout" in p or "Ruptura" in p: return "Ruptura/Breakout"
+                    if "mercado" in p: return "A mercado"
+                    return p[:25]
+                df_an["tipo"] = df_an["propuesta"].map(_tipo)
+                df_an["win"] = df_an["estado"].astype(str).isin(["tp1", "tp2"])
+                df_an["res_usd"] = pd.to_numeric(df_an["resultado_usd"],
+                                                  errors="coerce")
+                resumen = df_an.groupby("tipo").agg(
+                    Trades=("win", "size"),
+                    Aciertos=("win", "sum"),
+                    PnL_usd=("res_usd", "sum")).reset_index()
+                resumen["Win rate"] = (resumen["Aciertos"] / resumen["Trades"]
+                                        * 100).round(0).astype(int).astype(str) + "%"
+                resumen["PnL_usd"] = resumen["PnL_usd"].round(0)
+                st.dataframe(resumen.rename(columns={"tipo": "Tipo de entrada",
+                                                      "PnL_usd": "P&L $"}),
+                             use_container_width=True, hide_index=True)
+                st.caption("💡 Con 10+ trades por tipo, estos números te dicen qué "
+                           "estrategia refinar y cuál abandonar. Menos de 5: anécdota.")
+            except Exception:
+                pass
+
+
 
 # ╔═══════════════════════════════════════════════════════════════╗
 # ║  ANÁLISIS INDIVIDUAL                                          ║
@@ -4657,9 +4927,38 @@ elif pagina == "📈 Análisis Individual":
                         "Si toca Stop":  f"−${abs(p['pnl_stop']):,.0f} ({p['pct_stop']:+.1f}%)",
                         "Si toca TP1":   f"+${p['pnl_tp1']:,.0f} ({p['pct_tp1']:+.1f}%)",
                         "Si toca TP2":   f"+${p['pnl_tp2']:,.0f} ({p['pct_tp2']:+.1f}%)",
+                        "📌 Registrar":  False,
                     })
-                st.dataframe(pd.DataFrame(filas_e), use_container_width=True,
-                             hide_index=True)
+                df_editor = st.data_editor(
+                    pd.DataFrame(filas_e),
+                    use_container_width=True, hide_index=True,
+                    disabled=[c for c in filas_e[0].keys() if c != "📌 Registrar"],
+                    column_config={
+                        "📌 Registrar": st.column_config.CheckboxColumn(
+                            "📌 Registrar",
+                            help="Marca para guardar este trade en tu Diario "
+                                 "(pestaña Watchlist) y seguir su resultado")
+                    },
+                    key=f"editor_entrada_{ticker_in}")
+
+                # Procesar registros marcados
+                marcados = df_editor[df_editor["📌 Registrar"] == True]
+                if not marcados.empty:
+                    planes_map = {n: (o, p) for n, o, p, _, _ in propuestas}
+                    for _, fila_m in marcados.iterrows():
+                        nombre_m = fila_m["Propuesta"]
+                        if nombre_m in planes_map:
+                            orden_m, plan_m = planes_map[nombre_m]
+                            plan_m = dict(plan_m)
+                            plan_m["rr"] = plan_m.get("rr1")
+                            ok_t, msg_t = trades_add(ticker_in, nombre_m,
+                                                      orden_m, plan_m, ai_importe)
+                            if ok_t:
+                                st.success(f"📒 **{nombre_m}** registrado en tu Diario "
+                                           f"de trades (estado: {msg_t}). "
+                                           f"Síguelo en ⭐ Watchlist.")
+                            else:
+                                st.info(f"ℹ️ {nombre_m}: {msg_t}")
 
                 # Aviso si el importe no alcanza para 1 acción
                 if any(p["shares"] == 0 for _, _, p, _, _ in propuestas):
