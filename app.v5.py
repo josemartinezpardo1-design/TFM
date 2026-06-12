@@ -1265,17 +1265,71 @@ def trades_add(ticker, propuesta, orden, plan, importe):
                 return False, "Ya registrado y sigue vivo"
         estado = "abierto" if orden == "Mercado" else "pendiente"
         fecha = datetime.now().strftime("%Y-%m-%d")
-        ws.append_row(
-            [fecha, ticker, propuesta, orden,
-             round(float(plan["entrada"]), 2), round(float(plan["stop"]), 2),
-             round(float(plan["tp1"]), 2), round(float(plan["tp2"]), 2),
-             round(float(plan["rr"]), 2) if plan.get("rr") else "",
-             int(plan["shares"]), round(float(plan["inversion"]), 2),
-             estado, "", "", ""],
+        # CRÍTICO: escribir con ws.update + RAW en la siguiente fila libre.
+        # append_row demostró NO respetar RAW en la versión de gspread de
+        # Streamlit Cloud (precios sin decimales por el locale español);
+        # ws.update + RAW es el método verificado en la watchlist.
+        n_filas = len(ws.get_all_values())
+        fila_destino = n_filas + 1
+        ws.update(
+            range_name=f"A{fila_destino}:O{fila_destino}",
+            values=[[fecha, ticker, propuesta, orden,
+                     round(float(plan["entrada"]), 2), round(float(plan["stop"]), 2),
+                     round(float(plan["tp1"]), 2), round(float(plan["tp2"]), 2),
+                     round(float(plan["rr"]), 2) if plan.get("rr") else "",
+                     int(plan["shares"]), round(float(plan["inversion"]), 2),
+                     estado, "", "", ""]],
             value_input_option="RAW")
         return True, estado
     except Exception as e:
         return False, str(e)[:80]
+
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _precios_now(tickers_tuple):
+    """Último precio de una lista de tickers (bulk 5d). dict ticker->precio."""
+    out = {}
+    try:
+        lista = list(tickers_tuple)
+        if not lista:
+            return out
+        raw = yf.download(lista, period="5d", auto_adjust=True, progress=False)
+        if raw is None or raw.empty:
+            return out
+        if isinstance(raw.columns, pd.MultiIndex):
+            for t in lista:
+                try:
+                    c = raw["Close"][t].dropna()
+                    if not c.empty:
+                        out[t] = float(c.iloc[-1])
+                except Exception:
+                    continue
+        elif len(lista) == 1 and "Close" in raw.columns:
+            c = raw["Close"].dropna()
+            if not c.empty:
+                out[lista[0]] = float(c.iloc[-1])
+    except Exception:
+        pass
+    return out
+
+
+def trades_cerrar(fila_sheet, entrada, acciones, precio_salida):
+    """Cierre manual: archiva el trade con el precio de salida indicado.
+    Escribe estado/resultado/fecha en L:O con RAW (anti-locale)."""
+    ws = get_trades_ws()
+    if ws is None or precio_salida <= 0 or entrada <= 0:
+        return False
+    try:
+        res_pct = round((precio_salida / entrada - 1) * 100, 2)
+        res_usd = round(acciones * (precio_salida - entrada), 2)
+        fecha = datetime.now().strftime("%Y-%m-%d")
+        ws.update(range_name=f"L{fila_sheet}:O{fila_sheet}",
+                  values=[["cerrado", res_pct, res_usd, fecha]],
+                  value_input_option="RAW")
+        return True
+    except Exception:
+        return False
 
 
 def trades_evaluar(df_trades):
@@ -4389,22 +4443,20 @@ elif pagina == "⭐ Watchlist":
                     st.rerun()
 
     # ═══════════════════════════════════════════════════════════════
-    # 📒 DIARIO DE TRADES — seguimiento de las entradas registradas
+    # 📒 DIARIO DE TRADES — activos vs histórico
     # ═══════════════════════════════════════════════════════════════
     st.divider()
     st.markdown("## 📒 Diario de trades")
     st.caption("Las entradas que registras desde **Análisis Individual → 🎯 Entrada** "
-               "se evalúan aquí automáticamente contra el precio real: si tocaron "
-               "su entrada, su stop o sus objetivos. Paper trading con velas "
-               "diarias — los fills reales pueden diferir en gaps.")
+               "se evalúan automáticamente contra el precio real. Paper trading con "
+               "velas diarias — los fills reales pueden diferir en gaps.")
 
     df_tr = trades_load()
     if df_tr.empty:
-        st.info("📭 Aún no has registrado ningún trade. Analiza un valor, ve a la "
-                "pestaña 🎯 Entrada y marca el checkbox 📌 de la propuesta que "
-                "quieras seguir.")
+        st.info("📭 Aún no has registrado ningún trade. Analiza un valor, ve a "
+                "🎯 Entrada y marca el 📌 de la propuesta que quieras seguir.")
     else:
-        # Evaluación automática de vivos
+        # ── Evaluación automática de vivos ────────────────────────
         n_vivos = int(df_tr["estado"].astype(str).isin(["pendiente", "abierto"]).sum())
         if n_vivos > 0:
             with st.spinner(f"Evaluando {n_vivos} trades vivos contra el mercado..."):
@@ -4413,71 +4465,174 @@ elif pagina == "⭐ Watchlist":
                 st.success(f"🔄 {n_cambios} trades actualizados (ejecuciones, "
                            f"stops o TPs tocados)")
 
-        # ── Métricas globales ────────────────────────────────────
-        cerrados = df_tr[df_tr["estado"].astype(str).isin(["stop", "tp1", "tp2"])]
-        abiertos = df_tr[df_tr["estado"].astype(str) == "abierto"]
-        pendientes = df_tr[df_tr["estado"].astype(str) == "pendiente"]
-
-        c_t1, c_t2, c_t3, c_t4, c_t5 = st.columns(5)
-        c_t1.metric("Total registrados", len(df_tr))
-        c_t2.metric("Abiertos", len(abiertos))
-        c_t3.metric("Pendientes de ejecutar", len(pendientes))
-        if len(cerrados) > 0:
-            wins = int(cerrados["estado"].astype(str).isin(["tp1", "tp2"]).sum())
-            win_rate = wins / len(cerrados) * 100
-            try:
-                pnl_total = pd.to_numeric(cerrados["resultado_usd"],
-                                          errors="coerce").sum()
-            except Exception:
-                pnl_total = 0
-            c_t4.metric("Win rate (cerrados)", f"{win_rate:.0f}%",
-                        help="TP1/TP2 cuentan como acierto, stop como fallo")
-            c_t5.metric("P&L cerrado", f"${pnl_total:+,.0f}")
-        else:
-            c_t4.metric("Win rate", "—", help="Sin trades cerrados todavía")
-            c_t5.metric("P&L cerrado", "—")
-
-        # ── Tabla con estado coloreado ───────────────────────────
         EMOJI_ESTADO = {"pendiente": "⏳ pendiente", "abierto": "📈 abierto",
-                        "stop": "🔴 stop", "tp1": "🟢 TP1", "tp2": "🟢🟢 TP2"}
-        df_show_tr = df_tr.copy()
-        df_show_tr["estado"] = df_show_tr["estado"].astype(str).map(
-            lambda x: EMOJI_ESTADO.get(x, x))
-        st.dataframe(df_show_tr.iloc[::-1], use_container_width=True,
-                     hide_index=True)
+                        "stop": "🔴 stop", "tp1": "🟢 TP1", "tp2": "🟢🟢 TP2",
+                        "cerrado": "🔒 manual"}
+        df_tr["estado"] = df_tr["estado"].astype(str)
+        activos = df_tr[df_tr["estado"].isin(["pendiente", "abierto"])]
+        historico = df_tr[df_tr["estado"].isin(["stop", "tp1", "tp2", "cerrado"])]
 
-        # ── Rendimiento por tipo de propuesta (el refinamiento) ──
-        if len(cerrados) >= 3:
-            st.markdown("#### 🔬 ¿Qué tipo de entrada te funciona mejor?")
-            try:
-                df_an = cerrados.copy()
-                # Normalizar nombre de propuesta (quitar emoji y nivel concreto)
-                def _tipo(p):
-                    p = str(p)
-                    if "soporte" in p: return "Rebote en soporte"
-                    if "MA50" in p: return "Pullback MA50"
-                    if "Breakout" in p or "Ruptura" in p: return "Ruptura/Breakout"
-                    if "mercado" in p: return "A mercado"
-                    return p[:25]
-                df_an["tipo"] = df_an["propuesta"].map(_tipo)
-                df_an["win"] = df_an["estado"].astype(str).isin(["tp1", "tp2"])
-                df_an["res_usd"] = pd.to_numeric(df_an["resultado_usd"],
-                                                  errors="coerce")
-                resumen = df_an.groupby("tipo").agg(
-                    Trades=("win", "size"),
-                    Aciertos=("win", "sum"),
-                    PnL_usd=("res_usd", "sum")).reset_index()
-                resumen["Win rate"] = (resumen["Aciertos"] / resumen["Trades"]
-                                        * 100).round(0).astype(int).astype(str) + "%"
-                resumen["PnL_usd"] = resumen["PnL_usd"].round(0)
-                st.dataframe(resumen.rename(columns={"tipo": "Tipo de entrada",
-                                                      "PnL_usd": "P&L $"}),
-                             use_container_width=True, hide_index=True)
-                st.caption("💡 Con 10+ trades por tipo, estos números te dicen qué "
-                           "estrategia refinar y cuál abandonar. Menos de 5: anécdota.")
-            except Exception:
-                pass
+        # ═══ 🔥 TRADES ACTIVOS ════════════════════════════════════
+        st.markdown(f"### 🔥 Trades activos ({len(activos)})")
+        if activos.empty:
+            st.caption("Sin trades activos ahora mismo.")
+        else:
+            tickers_act = tuple(sorted(set(activos["ticker"].astype(str))))
+            precios_act = _precios_now(tickers_act)
 
+            filas_act = []
+            for idx, r in activos.iterrows():
+                try:
+                    entrada_v = float(r["entrada"]) if r["entrada"] != "" else 0.0
+                except Exception:
+                    entrada_v = 0.0
+                try:
+                    acciones_v = float(r["acciones"]) if r["acciones"] != "" else 0.0
+                except Exception:
+                    acciones_v = 0.0
+                actual = precios_act.get(str(r["ticker"]))
+                estado_v = str(r["estado"])
+
+                if actual and entrada_v > 0 and estado_v == "abierto":
+                    desde_alta = (actual / entrada_v - 1) * 100
+                    desde_alta_txt = f"{desde_alta:+.1f}%"
+                    pnl_txt = f"${acciones_v * (actual - entrada_v):+,.0f}"
+                elif actual and entrada_v > 0:  # pendiente: distancia a la entrada
+                    dist = (entrada_v / actual - 1) * 100
+                    desde_alta_txt = f"entrada a {dist:+.1f}%"
+                    pnl_txt = "—"
+                else:
+                    desde_alta_txt, pnl_txt = "—", "—"
+
+                filas_act.append({
+                    "fila_sheet":   idx + 2,
+                    "Fecha":        r["fecha_registro"],
+                    "Ticker":       r["ticker"],
+                    "Propuesta":    r["propuesta"],
+                    "Orden":        r["orden"],
+                    "Entrada":      r["entrada"],
+                    "Stop":         r["stop"],
+                    "TP1":          r["tp1"],
+                    "TP2":          r["tp2"],
+                    "Acciones":     r["acciones"],
+                    "Estado":       EMOJI_ESTADO.get(estado_v, estado_v),
+                    "Precio actual": round(actual, 2) if actual else None,
+                    "Desde alta":   desde_alta_txt,
+                    "P&L flotante": pnl_txt,
+                    "✖️ Cerrar":    False,
+                })
+
+            df_act_show = pd.DataFrame(filas_act)
+            df_editor_tr = st.data_editor(
+                df_act_show.drop(columns=["fila_sheet"]),
+                use_container_width=True, hide_index=True,
+                disabled=[c for c in df_act_show.columns
+                          if c not in ("✖️ Cerrar", "fila_sheet")],
+                column_config={
+                    "✖️ Cerrar": st.column_config.CheckboxColumn(
+                        "✖️ Cerrar",
+                        help="Marca para cerrar este trade manualmente: te "
+                             "preguntará el precio de salida y lo archivará "
+                             "en el histórico")},
+                key="editor_trades_activos")
+
+            marcadas_tr = df_editor_tr[df_editor_tr["✖️ Cerrar"] == True]
+            if not marcadas_tr.empty:
+                pos = marcadas_tr.index[0]
+                info_tr = df_act_show.loc[pos]
+                st.markdown(f"#### 🔒 Cerrar **{info_tr['Ticker']}** — "
+                            f"{info_tr['Propuesta']}")
+                try:
+                    default_p = float(info_tr["Precio actual"]) \
+                        if info_tr["Precio actual"] else float(info_tr["Entrada"])
+                except Exception:
+                    default_p = 0.0
+                c_cl1, c_cl2 = st.columns([2, 1])
+                precio_salida = c_cl1.number_input(
+                    "Precio de salida", min_value=0.0, value=default_p,
+                    step=0.01, format="%.2f", key="precio_cierre_tr")
+                if c_cl2.button("🔒 Confirmar cierre", type="primary",
+                                use_container_width=True):
+                    try:
+                        entrada_c = float(info_tr["Entrada"])
+                        acciones_c = float(info_tr["Acciones"])
+                    except Exception:
+                        entrada_c, acciones_c = 0.0, 0.0
+                    if trades_cerrar(int(info_tr["fila_sheet"]), entrada_c,
+                                     acciones_c, precio_salida):
+                        st.session_state.pop("editor_trades_activos", None)
+                        st.success(f"🔒 {info_tr['Ticker']} cerrado a "
+                                   f"{precio_salida:.2f} — archivado en el histórico")
+                        st.rerun()
+                    else:
+                        st.error("No se pudo cerrar — revisa la conexión con Sheets")
+                st.caption("💡 Para cancelar un trade sin P&L (reset), cierra con "
+                           "precio de salida = precio de entrada.")
+
+        # ═══ 📚 HISTÓRICO ═════════════════════════════════════════
+        st.markdown(f"### 📚 Histórico ({len(historico)})")
+        if historico.empty:
+            st.caption("Aún no hay trades cerrados. Cuando un trade toque su stop, "
+                       "sus objetivos, o lo cierres con la ✖️, aparecerá aquí.")
+        else:
+            res_num = pd.to_numeric(historico["resultado_pct"], errors="coerce")
+            usd_num = pd.to_numeric(historico["resultado_usd"], errors="coerce")
+            n_con_res = int(res_num.notna().sum())
+            wins_h = int((res_num > 0).sum())
+
+            c_h1, c_h2, c_h3 = st.columns(3)
+            c_h1.metric("Trades cerrados", len(historico))
+            c_h2.metric("Win rate", f"{wins_h / n_con_res * 100:.0f}%"
+                        if n_con_res else "—",
+                        help="% de trades cerrados con resultado positivo")
+            c_h3.metric("P&L total", f"${usd_num.sum():+,.0f}" if n_con_res else "—")
+
+            df_h_show = historico.copy()
+            df_h_show["estado"] = df_h_show["estado"].map(
+                lambda x: EMOJI_ESTADO.get(x, x))
+            cols_hist = ["fecha_registro", "ticker", "propuesta", "orden",
+                         "entrada", "stop", "tp1", "acciones",
+                         "estado", "resultado_pct", "resultado_usd", "fecha_cierre"]
+            st.dataframe(df_h_show[[c for c in cols_hist if c in df_h_show.columns]]
+                         .iloc[::-1],
+                         use_container_width=True, hide_index=True)
+
+            # ── ¿Qué tipo de entrada funciona mejor? ──────────────
+            if n_con_res >= 3:
+                st.markdown("#### 🔬 ¿Qué tipo de entrada te funciona mejor?")
+                try:
+                    df_an = historico.copy()
+                    def _tipo(p):
+                        p = str(p)
+                        if "soporte" in p: return "Rebote en soporte"
+                        if "MA50" in p: return "Pullback MA50"
+                        if "Breakout" in p or "Ruptura" in p: return "Ruptura/Breakout"
+                        if "mercado" in p: return "A mercado"
+                        return p[:25]
+                    df_an["tipo"] = df_an["propuesta"].map(_tipo)
+                    df_an["res_pct"] = pd.to_numeric(df_an["resultado_pct"],
+                                                     errors="coerce")
+                    df_an["res_usd"] = pd.to_numeric(df_an["resultado_usd"],
+                                                     errors="coerce")
+                    df_an = df_an[df_an["res_pct"].notna()]
+                    df_an["win"] = df_an["res_pct"] > 0
+                    resumen_t = df_an.groupby("tipo").agg(
+                        Trades=("win", "size"),
+                        Aciertos=("win", "sum"),
+                        Ret_medio=("res_pct", "mean"),
+                        PnL=("res_usd", "sum")).reset_index()
+                    resumen_t["Win rate"] = (resumen_t["Aciertos"] / resumen_t["Trades"]
+                                             * 100).round(0).astype(int).astype(str) + "%"
+                    resumen_t["Ret_medio"] = resumen_t["Ret_medio"].round(1)
+                    resumen_t["PnL"] = resumen_t["PnL"].round(0)
+                    st.dataframe(resumen_t.rename(columns={
+                        "tipo": "Tipo de entrada", "Ret_medio": "Ret. medio %",
+                        "PnL": "P&L $"}),
+                        use_container_width=True, hide_index=True)
+                    st.caption("💡 Con 10+ trades por tipo estos números te dicen qué "
+                               "estrategia refinar y cuál abandonar. Menos de 5: anécdota.")
+                except Exception:
+                    pass
 
 
 # ╔═══════════════════════════════════════════════════════════════╗
