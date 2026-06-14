@@ -2387,11 +2387,13 @@ def _detectar_sr(hist, precio, n_pivots=10, tol=0.02):
         return [], []
 
 
-def _plan_operativo(precio, atr, capital, riesgo_pct, entrada=None):
+def _plan_operativo(precio, atr, capital, riesgo_pct, entrada=None, importe=None):
     """
     Genera plan operativo: entrada, stop (2xATR cap -15%), TP1/TP2,
-    nº acciones según riesgo por operación, e inversión total.
+    nº acciones e inversión total.
     Stop anclado al precio de ENTRADA, no al de mercado.
+    Sizing: si se pasa `importe`, shares = importe // entrada (modelo directo);
+    si no, se calcula por riesgo_pct del capital (modelo antiguo).
     """
     entrada = entrada if entrada else precio
     stop = entrada - 2 * atr
@@ -2400,13 +2402,19 @@ def _plan_operativo(precio, atr, capital, riesgo_pct, entrada=None):
     riesgo_accion = entrada - stop
     if riesgo_accion <= 0:
         return None
-    riesgo_eur = capital * riesgo_pct / 100
-    shares = int(riesgo_eur / riesgo_accion)
-    inversion = shares * entrada
-    # Cap de concentración: máx 25% del capital en una posición
-    if inversion > capital * 0.25 and entrada > 0:
-        shares = int(capital * 0.25 / entrada)
+    if importe is not None:
+        if entrada <= 0:
+            return None
+        shares = int(importe // entrada)
         inversion = shares * entrada
+    else:
+        riesgo_eur = capital * riesgo_pct / 100
+        shares = int(riesgo_eur / riesgo_accion)
+        inversion = shares * entrada
+        # Cap de concentración: máx 25% del capital en una posición
+        if inversion > capital * 0.25 and entrada > 0:
+            shares = int(capital * 0.25 / entrada)
+            inversion = shares * entrada
     tp1 = entrada + 2 * (entrada - stop)   # R/R 2:1
     tp2 = entrada + 4 * (entrada - stop)   # R/R 4:1
     return {
@@ -2415,6 +2423,9 @@ def _plan_operativo(precio, atr, capital, riesgo_pct, entrada=None):
         "tp1": tp1, "tp2": tp2,
         "shares": shares, "inversion": inversion,
         "riesgo_eur": shares * riesgo_accion,
+        "pnl_stop": shares * (stop - entrada),
+        "pnl_tp1": shares * (tp1 - entrada),
+        "pnl_tp2": shares * (tp2 - entrada),
     }
 
 
@@ -3198,10 +3209,13 @@ elif pagina == "🔍 Screener":
         estrategia = st.selectbox("Estrategia", list(ESTRATEGIAS.keys()))
 
         st.divider()
-        st.markdown("**💰 Gestión del riesgo**")
+        st.markdown("**💰 Plan de inversión**")
         capital    = st.number_input("Capital disponible ($)", 1000, 10000000, 10000, step=1000)
-        riesgo_pct = st.slider("Riesgo por operación (%)", 0.5, 3.0, 1.0, 0.25,
-                               help="% del capital que pierdes si salta el stop. 1% es el estándar profesional.")
+        importe_op = st.number_input("Importe por operación ($)", 100, 10000000, 1000,
+                                     step=100,
+                                     help="Lo que inviertes en cada posición. El plan "
+                                          "te dirá acciones, inversión y P&L en cada nivel.")
+        riesgo_pct = 1.0  # compat. interna; el sizing ahora va por importe
 
         # Filtros manuales solo si aplica
         if estrategia == "🔧 Filtros manuales":
@@ -3222,13 +3236,13 @@ elif pagina == "🔍 Screener":
     st.markdown(f"*{ESTRATEGIAS[estrategia]}*")
 
     if not ejecutar:
-        st.info("👈 Elige estrategia, define tu capital y riesgo, y pulsa **Ejecutar**.")
+        st.info("👈 Elige estrategia, define tu capital e importe por operación, y pulsa **Ejecutar**.")
         st.markdown("""
         **Cómo funciona el plan operativo de cada resultado:**
         - 🛑 **Stop loss** = entrada − 2×ATR (máximo -15%). El ATR mide la volatilidad
           real del valor: un stop a 2×ATR aguanta el ruido normal sin salirte por nada.
-        - 📏 **Tamaño de posición** = tu riesgo por operación (€) ÷ distancia al stop.
-          Así, si salta el stop, pierdes exactamente lo que decidiste arriesgar — ni más ni menos.
+        - 📏 **Tamaño de posición** = importe por operación ÷ precio de entrada.
+          Las columnas "Si toca…" te muestran cuánto ganas o pierdes en dólares en cada nivel.
         - 🎯 **TP1 / TP2** = objetivos a ratio 2:1 y 4:1 sobre el riesgo asumido.
         """)
         st.stop()
@@ -3366,7 +3380,7 @@ elif pagina == "🔍 Screener":
     for _, r in seleccion.iterrows():
         entrada = r.get("entrada_custom", r["precio"])
         plan = _plan_operativo(r["precio"], r["atr"], capital, riesgo_pct,
-                                entrada=entrada)
+                                entrada=entrada, importe=importe_op)
         if plan is None:
             continue
         filas.append({
@@ -3380,7 +3394,9 @@ elif pagina == "🔍 Screener":
             "TP2":          round(plan["tp2"], 2),
             "Acciones":     plan["shares"],
             "Inversión $":  round(plan["inversion"], 0),
-            "Riesgo $":     round(plan["riesgo_eur"], 0),
+            "Si toca Stop": f"−${abs(plan['pnl_stop']):,.0f}",
+            "Si toca TP1":  f"+${plan['pnl_tp1']:,.0f}",
+            "Si toca TP2":  f"+${plan['pnl_tp2']:,.0f}",
             "Mom 3M %":     round(r["mom_3m"], 1) if pd.notna(r.get("mom_3m")) else None,
             "RSI":          round(r["rsi"], 0) if pd.notna(r.get("rsi")) else None,
             "ATR %":        round(r["atr_pct"], 1) if pd.notna(r.get("atr_pct")) else None,
@@ -3395,16 +3411,19 @@ elif pagina == "🔍 Screener":
 
     # Resumen de cartera propuesta
     inv_total = df_out["Inversión $"].sum()
-    riesgo_total = df_out["Riesgo $"].sum()
+    # Pérdida total potencial si todos los stops saltan (suma de "Si toca Stop")
+    riesgo_total = df_out["Si toca Stop"].apply(
+        lambda x: float(str(x).replace("−$", "").replace("$", "").replace(",", ""))
+        if x else 0).sum()
     col_r1, col_r2, col_r3, col_r4 = st.columns(4)
     col_r1.metric("Candidatos", len(df_out))
     col_r2.metric("Inversión total", f"${inv_total:,.0f}")
     col_r3.metric("% del capital", f"{inv_total/capital*100:.0f}%")
-    col_r4.metric("Riesgo total si saltan stops", f"${riesgo_total:,.0f}")
+    col_r4.metric("Pérdida si saltan todos los stops", f"−${riesgo_total:,.0f}")
 
     if inv_total > capital:
         st.warning(f"⚠️ La inversión propuesta (${inv_total:,.0f}) supera tu capital. "
-                   f"Elige menos posiciones o reduce el riesgo por operación.")
+                   f"Elige menos posiciones o reduce el importe por operación.")
 
     st.dataframe(
         df_out.style.map(_color_pct, subset=["Mom 3M %","Stop %"]),
@@ -3415,7 +3434,7 @@ elif pagina == "🔍 Screener":
     st.caption(
         "💡 **Cómo leer la tabla:** compra 'Acciones' a precio 'Entrada', "
         "pon el stop en 'Stop' y vende la mitad en TP1 y el resto en TP2. "
-        "Si salta el stop pierdes 'Riesgo $' — exactamente lo que configuraste."
+        "Las columnas 'Si toca…' muestran el P&L exacto en dólares en cada nivel."
     )
 
     # Botones de seguimiento por ticker
@@ -6361,6 +6380,11 @@ elif pagina == "📊 Macro":
         # Curva de tipos spot (puntos de la curva)
         if fred_client:
             st.markdown("### 📐 Curva de Tipos US (actual vs hace 1 año)")
+            # IDs de FRED para cada punto de la curva del Tesoro US
+            YIELD_CURVE_SERIES = {
+                "1M": "DGS1MO", "3M": "DGS3MO", "6M": "DGS6MO", "1A": "DGS1",
+                "2A": "DGS2", "5A": "DGS5", "10A": "DGS10", "30A": "DGS30",
+            }
             maturities = ["1M","3M","6M","1A","2A","5A","10A","30A"]
             curve_now  = []
             curve_1y   = []
