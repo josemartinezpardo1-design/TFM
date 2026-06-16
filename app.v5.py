@@ -117,8 +117,25 @@ def descargar(ticker: str, period: str = "1y"):
     hist = pd.DataFrame()
     info: dict = {}
 
-    # ── 1. Precios: Finnhub ──────────────────────────────────────
-    if fh_client:
+    # ── 1. Precios: yfinance (PRIMARIO) ──────────────────────────
+    # El endpoint stock_candles de Finnhub dejó de estar disponible en el
+    # plan gratuito ("You don't have access to this resource"), así que
+    # yfinance pasa a ser la fuente primaria de precios, igual que en
+    # _fetch_historico (que usa la Watchlist y funciona con normalidad).
+    for _intento in range(3):
+        try:
+            t = yf.Ticker(ticker)
+            h = t.history(period=period, auto_adjust=True)
+            if not h.empty and "Close" in h.columns and len(h) > 10:
+                hist = h
+                info["_source_prices"] = "Yahoo Finance"
+                break
+        except Exception:
+            pass
+        time.sleep(1)
+
+    # ── 2. Precios: Finnhub candles (fallback, si recupera acceso) ──
+    if hist.empty and fh_client:
         try:
             now   = int(datetime.now().timestamp())
             start = int((datetime.now() - timedelta(days=days)).timestamp())
@@ -132,20 +149,6 @@ def descargar(ticker: str, period: str = "1y"):
                 info["_source_prices"] = "Finnhub"
         except Exception:
             pass
-
-    # ── 2. Precios: yfinance (fallback) ─────────────────────────
-    if hist.empty:
-        for _ in range(2):
-            try:
-                t = yf.Ticker(ticker)
-                h = t.history(period=period)
-                if not h.empty and len(h) > 10:
-                    hist = h
-                    info["_source_prices"] = "Yahoo Finance"
-                    break
-            except Exception:
-                pass
-            time.sleep(1)
 
     # ── 2b. Precios: FMP (segundo fallback) ──────────────────────
     if hist.empty and FMP_KEY:
@@ -280,6 +283,12 @@ def descargar(ticker: str, period: str = "1y"):
                 info["targetMeanPrice"] = fmp_pt.get("targetConsensus")
                 if not info.get("_source_target"):
                     info["_source_target"] = "FMP"
+
+    # Limpieza final: descartar filas con Close nulo. yfinance/Finnhub a veces
+    # devuelven sesiones con NaN (tickers con splits o escisiones recientes
+    # como GE). Centralizarlo aquí blinda todos los cálculos del módulo.
+    if not hist.empty and "Close" in hist.columns:
+        hist = hist[hist["Close"].notna()]
 
     return hist, info
 
@@ -3342,15 +3351,35 @@ elif pagina == "🔍 Screener":
         seleccion["entrada_custom"] = seleccion["ma50"]
 
     elif estrategia == "🚀 Breakout con volumen":
-        cand = df_m.dropna(subset=["high_60_prev", "vol_rel"])
-        cand = cand[
-            (cand["precio"] >= cand["high_60_prev"]) &
-            (cand["vol_rel"] >= 1.5) &
-            (cand["atr_pct"] < 8)
+        base = df_m.dropna(subset=["high_60_prev", "vol_rel"])
+        cand = base[
+            (base["precio"] >= base["high_60_prev"]) &
+            (base["vol_rel"] >= 1.5) &
+            (base["atr_pct"] < 8)
         ].copy()
         if cand.empty:
+            # Diagnóstico: ¿cuántos se quedaron cerca y por qué no pasaron?
+            rompen = base[base["precio"] >= base["high_60_prev"]]
+            con_vol = base[base["vol_rel"] >= 1.5]
+            rompen_sin_vol = base[(base["precio"] >= base["high_60_prev"]) &
+                                  (base["vol_rel"] < 1.5)]
             st.warning("Sin breakouts con volumen hoy. Las rupturas válidas no ocurren "
                        "todos los días — mejor esperar que forzar.")
+            st.markdown("**🔍 Diagnóstico de la búsqueda** *(el capital/importe NO "
+                        "filtran nada aquí, solo dimensionan la posición):*")
+            st.markdown(
+                f"- **{len(rompen)}** valores rompen su máximo de 60 días\n"
+                f"- **{len(con_vol)}** valores tienen volumen ≥ 1.5× su media\n"
+                f"- **{len(rompen_sin_vol)}** rompen máximos pero SIN el volumen "
+                f"exigido (la condición clave que falla hoy)")
+            if len(rompen_sin_vol) > 0:
+                ej = rompen_sin_vol.nlargest(min(5, len(rompen_sin_vol)),
+                                             "vol_rel")[["ticker", "vol_rel"]]
+                ej_txt = ", ".join(f"{r.ticker} (×{r.vol_rel:.1f})"
+                                   for r in ej.itertuples())
+                st.caption(f"Más cerca de pasar: {ej_txt} — les falta llegar a ×1.5 "
+                           f"de volumen. Prueba **Pullback** o **Momentum** para ver "
+                           f"que la búsqueda funciona con normalidad.")
             st.stop()
         seleccion = cand.sort_values("vol_rel", ascending=False).head(15).copy()
         seleccion["Señal"] = "Breakout 60d · Vol ×" + seleccion["vol_rel"].round(1).astype(str)
@@ -4758,6 +4787,18 @@ elif pagina == "📈 Análisis Individual":
         2. Espera 1-2 minutos y reintenta
         3. Limpia caché en la barra lateral
         """)
+        st.stop()
+
+    # Eliminar filas con Close nulo: yfinance a veces devuelve la última
+    # sesión (o sesiones sueltas) con NaN en tickers con reorganizaciones
+    # corporativas — p.ej. GE tras su split inverso y escisiones. Sin esto,
+    # float(hist["Close"].iloc[-1]) devuelve nan y contamina precio, cambio
+    # del día y momentum. Limpiar aquí lo arregla en todos los cálculos.
+    hist = hist[hist["Close"].notna()]
+    if hist.empty:
+        st.error(f"❌ Los datos de **{ticker_in}** llegan con precios nulos "
+                 f"(posible reorganización corporativa reciente). "
+                 f"Limpia caché y reintenta en unos minutos.")
         st.stop()
 
     # ── Datos básicos ──────────────────────────────────────────────
