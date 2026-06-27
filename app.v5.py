@@ -24,6 +24,185 @@ warnings.filterwarnings("ignore")
 
 st.set_page_config(page_title="TFM — Investment Intelligence", page_icon="📊", layout="wide")
 
+# ╔═══════════════════════════════════════════════════════════════╗
+# ║  TEMA VISUAL GLOBAL — estética fintech profesional (dark)      ║
+# ║  Reestiliza los componentes nativos de Streamlit sin tocar     ║
+# ║  la lógica. Inspirado en terminales cuantitativas modernas.    ║
+# ╚═══════════════════════════════════════════════════════════════╝
+st.markdown("""
+<style>
+/* ---- Tipografía base ---- */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+:root {
+    --bg-deep:    #0b0f1a;   /* fondo principal, azul-negro */
+    --bg-panel:   #141a28;   /* paneles y tarjetas */
+    --bg-panel-2: #1b2233;   /* hover / elementos elevados */
+    --border:     #263149;   /* bordes sutiles */
+    --txt:        #e6ebf5;   /* texto principal */
+    --txt-soft:   #9aa7c2;   /* texto secundario */
+    --accent:     #3b82f6;   /* azul de marca */
+    --accent-2:   #60a5fa;
+    --green:      #22c55e;
+    --red:        #ef4444;
+    --amber:      #f59e0b;
+}
+
+/* ---- Fondo general y fuente ---- */
+.stApp {
+    background: linear-gradient(180deg, #0b0f1a 0%, #0d121f 100%);
+    color: var(--txt);
+    font-family: 'Inter', -apple-system, sans-serif;
+}
+.main .block-container { padding-top: 2.2rem; max-width: 1300px; }
+
+/* ---- Títulos ---- */
+h1, h2, h3, h4 {
+    font-family: 'Inter', sans-serif !important;
+    font-weight: 700 !important;
+    letter-spacing: -0.02em;
+    color: var(--txt) !important;
+}
+h1 { font-size: 1.9rem !important; }
+h2 { font-size: 1.4rem !important; }
+h3 { font-size: 1.15rem !important; }
+
+/* ---- Sidebar ---- */
+[data-testid="stSidebar"] {
+    background: #0d1320 !important;
+    border-right: 1px solid var(--border);
+}
+[data-testid="stSidebar"] * { color: var(--txt) !important; }
+[data-testid="stSidebar"] h1,
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3 { color: #fff !important; }
+
+/* ---- Métricas (st.metric) → tarjetas tipo terminal ---- */
+[data-testid="stMetric"] {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 16px 18px;
+    transition: border-color .2s, transform .2s;
+}
+[data-testid="stMetric"]:hover {
+    border-color: var(--accent);
+    transform: translateY(-2px);
+}
+[data-testid="stMetricLabel"] {
+    color: var(--txt-soft) !important;
+    font-size: 0.8rem !important;
+    font-weight: 500 !important;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+[data-testid="stMetricValue"] {
+    color: var(--txt) !important;
+    font-weight: 700 !important;
+    font-size: 1.6rem !important;
+}
+
+/* ---- Botones ---- */
+.stButton > button {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 10px;
+    font-weight: 600;
+    padding: 0.5rem 1rem;
+    transition: background .2s, transform .1s;
+}
+.stButton > button:hover {
+    background: var(--accent-2);
+    transform: translateY(-1px);
+}
+.stButton > button[kind="secondary"] {
+    background: var(--bg-panel-2);
+    border: 1px solid var(--border);
+    color: var(--txt);
+}
+
+/* ---- Tabs ---- */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 4px;
+    background: var(--bg-panel);
+    border-radius: 12px;
+    padding: 5px;
+    border: 1px solid var(--border);
+}
+.stTabs [data-baseweb="tab"] {
+    border-radius: 8px;
+    color: var(--txt-soft);
+    font-weight: 500;
+    padding: 8px 16px;
+}
+.stTabs [aria-selected="true"] {
+    background: var(--accent) !important;
+    color: #fff !important;
+}
+
+/* ---- Inputs / selects ---- */
+.stTextInput input, .stNumberInput input, .stSelectbox > div > div {
+    background: var(--bg-panel) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 10px !important;
+    color: var(--txt) !important;
+}
+.stTextInput input:focus, .stNumberInput input:focus {
+    border-color: var(--accent) !important;
+}
+
+/* ---- DataFrames / tablas ---- */
+[data-testid="stDataFrame"] {
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+}
+
+/* ---- Expanders ---- */
+[data-testid="stExpander"] {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+}
+
+/* ---- Radio del menú lateral (módulos) como navegación ---- */
+[data-testid="stSidebar"] [role="radiogroup"] label {
+    background: transparent;
+    border-radius: 10px;
+    padding: 6px 10px;
+    margin: 2px 0;
+    transition: background .15s;
+}
+[data-testid="stSidebar"] [role="radiogroup"] label:hover {
+    background: var(--bg-panel-2);
+}
+
+/* ---- Alerts (info/warning/success) más sobrias ---- */
+.stAlert {
+    border-radius: 12px;
+    border: 1px solid var(--border);
+}
+
+/* ---- Scrollbar fina ---- */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: var(--bg-deep); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+
+/* ---- Divisores ---- */
+hr { border-color: var(--border) !important; }
+
+/* ---- Responsive móvil ---- */
+@media (max-width: 768px) {
+    .main .block-container { padding-top: 1.2rem; }
+    [data-testid="stMetricValue"] { font-size: 1.2rem !important; }
+    .stTabs [data-baseweb="tab"] { padding: 6px 10px; font-size: 0.8rem; }
+    h1 { font-size: 1.5rem !important; }
+}
+</style>
+""", unsafe_allow_html=True)
+
 
 # ╔═══════════════════════════════════════════════════════════════╗
 # ║  CLIENTES API                                                 ║
@@ -1861,8 +2040,23 @@ def recomendar_sectores(sector_weights_pct: dict, profile: str,
 # ║  SIDEBAR                                                      ║
 # ╚═══════════════════════════════════════════════════════════════╝
 with st.sidebar:
-    st.title("📊 TFM Investment App")
-    st.caption("Master IA Sector Financiero — VIU")
+    st.markdown("""
+    <div style="padding: 4px 0 14px 0;">
+        <div style="display:flex; align-items:center; gap:10px;">
+            <div style="width:38px; height:38px; border-radius:10px;
+                        background: linear-gradient(135deg, #3b82f6, #60a5fa);
+                        display:flex; align-items:center; justify-content:center;
+                        font-size:20px; box-shadow:0 4px 12px rgba(59,130,246,.35);">📈</div>
+            <div>
+                <div style="font-size:1.15rem; font-weight:800; color:#fff;
+                            letter-spacing:-0.02em; line-height:1;">TFM Quant</div>
+                <div style="font-size:0.72rem; color:#9aa7c2; margin-top:2px;">
+                    Investment Intelligence</div>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    st.caption("Máster IA Sector Financiero · VIU")
     st.divider()
     pagina = st.radio("Módulo", [
         "🌅 Outlook",
